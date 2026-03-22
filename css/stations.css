@@ -1,0 +1,293 @@
+/* ═══════════════════════════════════════
+   ARIA GPS — Stations Essence CSS
+   Ajoutez ce bloc à la fin de style.css
+   ═══════════════════════════════════════ */
+
+/* ── MARQUEURS STATIONS ── */
+.station-pin {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.45));
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+.station-pin:hover {
+  transform: translateY(-3px) scale(1.06);
+  filter: drop-shadow(0 4px 12px rgba(0,0,0,0.6));
+}
+
+/* Tailles */
+.marker-lg .pin-body { width: 46px; min-height: 46px; border-radius: 12px; }
+.marker-md .pin-body { width: 38px; min-height: 38px; border-radius: 10px; }
+.marker-xs .pin-body { width: 28px; min-height: 28px; border-radius: 8px; }
+
+.pin-abbr {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+
+/* Conteneur principal du pin */
+.station-pin .pin-body {
+  background: var(--brand-bg, #F3F4F6);
+  border: 2px solid var(--brand-color, #374151);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: visible;
+  gap: 1px;
+  padding: 4px 5px 2px;
+}
+
+/* Abbrevation de la marque */
+.marker-lg .pin-abbr { font-size: 13px; color: var(--brand-color, #374151); }
+.marker-md .pin-abbr { font-size: 11px; color: var(--brand-color, #374151); }
+.marker-xs .pin-abbr { font-size: 14px; }
+
+/* Prix diesel affiché sous l'abbr */
+.marker-price {
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--brand-color, #374151);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Icône type en bas */
+.pin-type {
+  font-size: 9px;
+  line-height: 1;
+  margin-top: 1px;
+}
+
+/* Queue du pin (triangle vers le bas) */
+.pin-tail {
+  width: 0; height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid var(--brand-color, #374151);
+  margin-top: -1px;
+}
+
+/* Override pour le rendu simplifié sans .pin-body (on utilise .station-pin directement) */
+.station-pin {
+  background: var(--brand-bg, #F3F4F6);
+  border: 2px solid var(--brand-color, #374151);
+  border-radius: 10px;
+  padding: 4px 6px 2px;
+  min-width: 36px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.station-pin::after {
+  content: '';
+  display: block;
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 7px solid var(--brand-color, #374151);
+  margin-top: 2px;
+}
+
+.marker-lg { min-width: 46px; padding: 5px 7px 2px; border-radius: 12px; }
+.marker-md { min-width: 36px; padding: 4px 6px 2px; border-radius: 10px; }
+.marker-xs { min-width: 26px; padding: 3px 4px 1px; border-radius: 8px; font-size: 11px; }
+.marker-xs .marker-price { display: none; }
+
+/* ── POPUP STATION ── */
+.mapboxgl-popup-content {
+  background: transparent !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+.mapboxgl-popup-tip { display: none !important; }
+
+.station-popup {
+  background: #0a0f1e;
+  border: 0.5px solid rgba(255,255,255,0.1);
+  border-radius: 18px;
+  overflow: hidden;
+  width: 270px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+  font-family: 'Syne', sans-serif;
+}
+
+.popup-header {
+  padding: 14px 16px 12px;
+  position: relative;
+}
+.popup-brand-name {
+  font-size: 17px;
+  font-weight: 700;
+  color: white;
+  letter-spacing: -0.3px;
+}
+.popup-type-label {
+  font-size: 11px;
+  color: rgba(255,255,255,0.65);
+  margin-top: 3px;
+}
+.popup-distance {
+  font-size: 11px;
+  color: rgba(255,255,255,0.5);
+  margin-top: 2px;
+}
+
+.popup-address {
+  font-size: 11px;
+  color: rgba(255,255,255,0.4);
+  padding: 8px 16px 4px;
+  border-bottom: 0.5px solid rgba(255,255,255,0.06);
+}
+.popup-hours {
+  font-size: 11px;
+  color: rgba(255,255,255,0.4);
+  padding: 4px 16px 8px;
+  border-bottom: 0.5px solid rgba(255,255,255,0.06);
+}
+
+.popup-fuels {
+  padding: 10px 16px;
+  border-bottom: 0.5px solid rgba(255,255,255,0.06);
+}
+.popup-section-title {
+  font-size: 9px;
+  color: rgba(255,255,255,0.3);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.popup-fuel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 0.5px solid rgba(255,255,255,0.04);
+}
+.popup-fuel-row:last-child { border-bottom: none; }
+.popup-fuel-icon { font-size: 14px; flex-shrink: 0; }
+.popup-fuel-name {
+  flex: 1;
+  font-size: 13px;
+  color: rgba(255,255,255,0.75);
+  font-weight: 500;
+}
+.popup-fuel-price {
+  font-family: 'DM Mono', monospace;
+  font-size: 14px;
+  font-weight: 500;
+  color: #00d4ff;
+}
+.popup-no-price {
+  font-size: 12px;
+  color: rgba(255,255,255,0.35);
+  text-align: center;
+  padding: 8px 0;
+  line-height: 1.6;
+}
+.popup-services {
+  font-size: 16px;
+  letter-spacing: 3px;
+  padding: 4px 0 2px;
+}
+
+.popup-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px 14px;
+}
+.popup-btn-nav {
+  flex: 1;
+  background: linear-gradient(135deg, #0050cc, #003db5);
+  border: 0.5px solid rgba(0,212,255,0.3);
+  border-radius: 10px;
+  padding: 10px;
+  font-family: 'Syne', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.popup-btn-close {
+  flex: 1;
+  background: rgba(255,255,255,0.05);
+  border: 0.5px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  padding: 10px;
+  font-family: 'Syne', sans-serif;
+  font-size: 13px;
+  color: rgba(255,255,255,0.5);
+  cursor: pointer;
+}
+
+/* ── BOUTON TOGGLE STATIONS ── */
+#stations-toggle {
+  position: fixed;
+  z-index: 85;
+  bottom: calc(var(--sheet-height) + 224px);
+  right: 16px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(8,12,24,0.88);
+  backdrop-filter: blur(12px);
+  border: 0.5px solid rgba(255,255,255,0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+/* ── LÉGENDE STATIONS ── */
+#stations-legend {
+  position: fixed;
+  bottom: calc(var(--sheet-height) + 16px);
+  left: 16px;
+  z-index: 85;
+  background: rgba(8,12,24,0.88);
+  backdrop-filter: blur(12px);
+  border: 0.5px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 10px 12px;
+  display: none; /* Masqué par défaut, visible en mode "recherche" */
+}
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: rgba(255,255,255,0.55);
+}
+.legend-row:last-child { margin-bottom: 0; }
+.legend-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  flex-shrink: 0;
+}
