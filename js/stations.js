@@ -1,7 +1,12 @@
 // ═══════════════════════════════════════
 //  ARIA GPS — Stations Essence
-//  Source prix : OSM + API carburants
 // ═══════════════════════════════════════
+
+const ARIA_NAV_SHARED = window.ARIA_NAV_SHARED || (window.ARIA_NAV_SHARED = {
+  currentRouteGeoJSON: null,
+  currentRouteSteps: [],
+  currentStepIndex: 0,
+});
 
 let stationMarkers = [];
 let stationsData = [];
@@ -28,32 +33,36 @@ const BRANDS = {
   casino:        { color: '#2E7D32', bg: '#E8F5E9', abbr: 'CA', full: 'Casino' },
   'systeme u':   { color: '#E63B2E', bg: '#FFF0EF', abbr: 'SU', full: 'Système U' },
   'super u':     { color: '#E63B2E', bg: '#FFF0EF', abbr: 'SU', full: 'Super U' },
-  nf:            { color: '#555',    bg: '#F5F5F5', abbr: 'NF', full: 'NF' },
+  nf:            { color: '#555', bg: '#F5F5F5', abbr: 'NF', full: 'NF' },
   dyneff:        { color: '#FF6B00', bg: '#FFF3E8', abbr: 'DY', full: 'Dyneff' },
   default:       { color: '#374151', bg: '#F3F4F6', abbr: '⛽', full: 'Station' },
 };
 
 const FUEL_LABELS = {
-  Gazole: { label: 'Diesel', icon: '🟡', color: '#F59E0B' },
-  SP95:   { label: 'SP95',   icon: '🟢', color: '#10B981' },
-  SP98:   { label: 'SP98',   icon: '🔵', color: '#3B82F6' },
-  E10:    { label: 'E10',    icon: '🟢', color: '#34D399' },
-  E85:    { label: 'E85',    icon: '🌿', color: '#6EE7B7' },
-  GPLc:   { label: 'GPL',    icon: '🟣', color: '#8B5CF6' },
-  HVO100: { label: 'HVO100', icon: '🌱', color: '#059669' },
+  Gazole: { label: 'Diesel', icon: '🟡' },
+  SP95:   { label: 'SP95', icon: '🟢' },
+  SP98:   { label: 'SP98', icon: '🔵' },
+  E10:    { label: 'E10', icon: '🟢' },
+  E85:    { label: 'E85', icon: '🌿' },
+  GPLc:   { label: 'GPL', icon: '🟣' },
+  HVO100: { label: 'HVO100', icon: '🌱' },
 };
 
 const FUEL_ORDER = ['Gazole', 'SP95', 'E10', 'SP98', 'E85', 'GPLc', 'HVO100'];
 
-// ── HELPERS ───────────────────────────
+// ──────────────────────────────────────
+// HELPERS
+// ──────────────────────────────────────
 
 function normalizeNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const parsed = parseFloat(String(value).replace(',', '.').replace(/\s/g, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
-  const str = String(value).replace(',', '.').replace(/\s/g, '');
-  const num = parseFloat(str);
-  return Number.isFinite(num) ? num : null;
+function uniq(arr = []) {
+  return [...new Set(arr.filter(Boolean))];
 }
 
 function escapeHtml(str = '') {
@@ -74,97 +83,80 @@ function escapeJsString(str = '') {
     .replace(/\r/g, ' ');
 }
 
-function uniq(arr = []) {
-  return [...new Set(arr.filter(Boolean))];
-}
-
 function fetchJsonWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   return fetch(url, { ...options, signal: controller.signal })
     .then(async (res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     })
-    .finally(() => clearTimeout(timeout));
+    .finally(() => clearTimeout(timer));
 }
 
-function buildGovAddress(gov) {
-  return [
-    gov.adresse || gov.address || '',
-    gov.cp || gov.postal_code || '',
-    gov.ville || gov.city || '',
-  ].filter(Boolean).join(' ').trim();
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) *
+    Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) ** 2;
+
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function parseGovServices(gov) {
-  const raw =
-    gov.services ||
-    gov.service ||
-    gov.services_service ||
-    gov.service_service ||
-    gov.services_list ||
-    [];
+function distancePointToSegmentKm(px, py, x1, y1, x2, y2) {
+  const A = px - x1;
+  const B = py - y1;
+  const C = x2 - x1;
+  const D = y2 - y1;
 
-  let items = [];
+  const dot = A * C + B * D;
+  const lenSq = C * C + D * D;
 
-  if (Array.isArray(raw)) {
-    items = raw;
-  } else if (typeof raw === 'string') {
-    items = raw.split(/[;,|]/).map(s => s.trim());
+  let param = -1;
+  if (lenSq !== 0) param = dot / lenSq;
+
+  let xx;
+  let yy;
+
+  if (param < 0) {
+    xx = x1;
+    yy = y1;
+  } else if (param > 1) {
+    xx = x2;
+    yy = y2;
+  } else {
+    xx = x1 + param * C;
+    yy = y1 + param * D;
   }
 
-  const out = [];
-
-  items.forEach((item) => {
-    const v = String(item).toLowerCase();
-
-    if (v.includes('toilet')) out.push('Toilettes');
-    if (v.includes('boutique') || v.includes('shop') || v.includes('aliment')) out.push('Boutique');
-    if (v.includes('restaurant') || v.includes('restauration') || v.includes('sandwich')) out.push('Restaurant');
-    if (v.includes('lavage') || v.includes('car wash') || v.includes('wash')) out.push('Lavage');
-    if (v.includes('wifi') || v.includes('wi-fi')) out.push('Wifi');
-  });
-
-  return uniq(out);
+  return haversineKm(py, px, yy, xx);
 }
 
-function extractGovLatLng(gov) {
-  let lat =
-    normalizeNumber(gov.latitude) ??
-    normalizeNumber(gov.Latitude) ??
-    normalizeNumber(gov.lat) ??
-    normalizeNumber(gov.geom?.lat) ??
-    normalizeNumber(gov.geo_point_2d?.lat);
-
-  let lng =
-    normalizeNumber(gov.longitude) ??
-    normalizeNumber(gov.Longitude) ??
-    normalizeNumber(gov.lng) ??
-    normalizeNumber(gov.lon) ??
-    normalizeNumber(gov.geom?.lon) ??
-    normalizeNumber(gov.geom?.lng) ??
-    normalizeNumber(gov.geo_point_2d?.lon);
-
-  if ((lat === null || lng === null) && Array.isArray(gov.geom?.coordinates)) {
-    lng = normalizeNumber(gov.geom.coordinates[0]);
-    lat = normalizeNumber(gov.geom.coordinates[1]);
+function isStationNearRoute(station, routeCoords, thresholdKm = 2.5) {
+  if (!station?.lat || !station?.lng || !Array.isArray(routeCoords) || routeCoords.length < 2) {
+    return false;
   }
 
-  if (lat !== null && Math.abs(lat) > 90) lat /= 100000;
-  if (lng !== null && Math.abs(lng) > 180) lng /= 100000;
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const [x1, y1] = routeCoords[i];
+    const [x2, y2] = routeCoords[i + 1];
+    const d = distancePointToSegmentKm(station.lng, station.lat, x1, y1, x2, y2);
+    if (d <= thresholdKm) return true;
+  }
 
-  if (lat === null || lng === null) return null;
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-
-  return { lat, lng };
+  return false;
 }
 
 function getBrand(name) {
   if (!name) return BRANDS.default;
-
   const key = name.toLowerCase().trim();
+
   for (const [k, v] of Object.entries(BRANDS)) {
     if (k !== 'default' && key.includes(k)) return v;
   }
@@ -180,21 +172,24 @@ function getStationId(station) {
   return station?.govId || station?.id || `${station?.lat}-${station?.lng}-${station?.name || ''}`;
 }
 
-function getVisibleStations(stations) {
-  const isMobile = window.innerWidth <= 768;
-  const maxStations = isMobile ? 20 : 60;
+function getStationsForCurrentContext(stations) {
+  let list = [...stations].filter(s => s.lat && s.lng);
 
-  let visibleStations = [...stations].filter(s => s.lat && s.lng);
+  if (navActive && ARIA_NAV_SHARED.currentRouteGeoJSON?.geometry?.coordinates?.length) {
+    const routeCoords = ARIA_NAV_SHARED.currentRouteGeoJSON.geometry.coordinates;
+    list = list.filter(s => isStationNearRoute(s, routeCoords, 2.5));
+  }
 
-  if (userLocation && userLocation.lat && userLocation.lng) {
-    visibleStations.sort((a, b) => {
+  if (userLocation?.lat && userLocation?.lng) {
+    list.sort((a, b) => {
       const da = haversineKm(userLocation.lat, userLocation.lng, a.lat, a.lng);
       const db = haversineKm(userLocation.lat, userLocation.lng, b.lat, b.lng);
       return da - db;
     });
   }
 
-  return visibleStations.slice(0, maxStations);
+  const isMobile = window.innerWidth <= 768;
+  return list.slice(0, isMobile ? 30 : 80);
 }
 
 function refreshStationSelection() {
@@ -211,75 +206,19 @@ function refreshStationSelection() {
   });
 }
 
-// ── CHARGEMENT PRINCIPAL ──────────────────────
+// ──────────────────────────────────────
+// OSM
+// ──────────────────────────────────────
 
-async function loadStationsAlongRoute(routeCoords) {
-  if (!routeCoords || !routeCoords.length) return;
-
-  const lngs = routeCoords.map(c => c[0]);
-  const lats = routeCoords.map(c => c[1]);
-
-  await loadStationsInBbox(
-    Math.min(...lats) - 0.15,
-    Math.max(...lats) + 0.15,
-    Math.min(...lngs) - 0.15,
-    Math.max(...lngs) + 0.15
-  );
+function parseOSMServices(tags) {
+  const s = [];
+  if (tags.toilets === 'yes' || tags['amenity:toilets'] === 'yes') s.push('Toilettes');
+  if (tags.shop === 'convenience') s.push('Boutique');
+  if (tags.restaurant === 'yes' || tags.fast_food === 'yes') s.push('Restaurant');
+  if (tags.car_wash === 'yes') s.push('Lavage');
+  if (tags.wifi === 'yes' || tags.internet_access === 'wlan') s.push('Wifi');
+  return uniq(s);
 }
-
-async function loadStationsNearUser(lat, lng, radiusKm = 15) {
-  const deg = radiusKm / 111;
-  await loadStationsInBbox(lat - deg, lat + deg, lng - deg, lng + deg);
-}
-
-async function loadStationsInBbox(minLat, maxLat, minLng, maxLng) {
-  try {
-    showToast('Recherche des stations carburant...');
-
-    const [osmRes, govRes] = await Promise.allSettled([
-      fetchStationsFromOSM(minLat, maxLat, minLng, maxLng),
-      fetchPricesGouvernement(minLat, maxLat, minLng, maxLng),
-    ]);
-
-    const osmStations = osmRes.status === 'fulfilled' ? osmRes.value : [];
-    const govPrices = govRes.status === 'fulfilled' ? govRes.value : [];
-
-    if (osmRes.status === 'rejected') {
-      console.warn('OSM error:', osmRes.reason);
-    }
-    if (govRes.status === 'rejected') {
-      console.warn('API carburants error:', govRes.reason);
-    }
-
-    const merged = mergeStationsAndPrices(osmStations, govPrices);
-    stationsData = merged;
-
-    // évite un rerender parasite juste après un clic station
-    if (Date.now() < stationClickLockUntil) return;
-    if (!stationsVisible) return;
-
-    clearStationMarkers(false);
-    renderStationMarkers(merged);
-
-    if (merged.length > 0) {
-      const shown = getVisibleStations(merged).length;
-      const isMobile = window.innerWidth <= 768;
-
-      showToast(
-        isMobile && merged.length > shown
-          ? `${shown} stations affichées sur ${merged.length}`
-          : `${merged.length} stations trouvées`
-      );
-    } else {
-      showToast('Aucune station trouvée');
-    }
-  } catch (err) {
-    console.error('Stations error:', err);
-    showToast('Erreur lors du chargement des stations');
-  }
-}
-
-// ── OSM : LOCALISATION ────────────────────────
 
 async function fetchStationsFromOSM(minLat, maxLat, minLng, maxLng) {
   const query = `
@@ -323,17 +262,126 @@ async function fetchStationsFromOSM(minLat, maxLat, minLng, maxLng) {
   }
 }
 
-function parseOSMServices(tags) {
-  const s = [];
-  if (tags.toilets === 'yes' || tags['amenity:toilets'] === 'yes') s.push('Toilettes');
-  if (tags.shop === 'convenience') s.push('Boutique');
-  if (tags.restaurant === 'yes' || tags.fast_food === 'yes') s.push('Restaurant');
-  if (tags.car_wash === 'yes') s.push('Lavage');
-  if (tags.wifi === 'yes' || tags.internet_access === 'wlan') s.push('Wifi');
-  return uniq(s);
+// ──────────────────────────────────────
+// API CARBURANTS
+// ──────────────────────────────────────
+
+function buildGovAddress(gov) {
+  return [
+    gov.adresse || gov.address || '',
+    gov.cp || gov.postal_code || '',
+    gov.ville || gov.city || '',
+  ].filter(Boolean).join(' ').trim();
 }
 
-// ── PRIX CARBURANTS : API ─────────────────────
+function parseGovServices(gov) {
+  const raw =
+    gov.services ||
+    gov.service ||
+    gov.services_service ||
+    gov.service_service ||
+    gov.services_list ||
+    [];
+
+  let items = [];
+
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === 'string') {
+    items = raw.split(/[;,|]/).map(s => s.trim());
+  }
+
+  const out = [];
+
+  items.forEach((item) => {
+    const v = String(item).toLowerCase();
+    if (v.includes('toilet')) out.push('Toilettes');
+    if (v.includes('boutique') || v.includes('shop') || v.includes('aliment')) out.push('Boutique');
+    if (v.includes('restaurant') || v.includes('restauration') || v.includes('sandwich')) out.push('Restaurant');
+    if (v.includes('lavage') || v.includes('wash')) out.push('Lavage');
+    if (v.includes('wifi') || v.includes('wi-fi')) out.push('Wifi');
+  });
+
+  return uniq(out);
+}
+
+function extractGovLatLng(gov) {
+  let lat =
+    normalizeNumber(gov.latitude) ??
+    normalizeNumber(gov.Latitude) ??
+    normalizeNumber(gov.lat) ??
+    normalizeNumber(gov.geom?.lat) ??
+    normalizeNumber(gov.geo_point_2d?.lat);
+
+  let lng =
+    normalizeNumber(gov.longitude) ??
+    normalizeNumber(gov.Longitude) ??
+    normalizeNumber(gov.lng) ??
+    normalizeNumber(gov.lon) ??
+    normalizeNumber(gov.geom?.lon) ??
+    normalizeNumber(gov.geom?.lng) ??
+    normalizeNumber(gov.geo_point_2d?.lon);
+
+  if ((lat === null || lng === null) && Array.isArray(gov.geom?.coordinates)) {
+    lng = normalizeNumber(gov.geom.coordinates[0]);
+    lat = normalizeNumber(gov.geom.coordinates[1]);
+  }
+
+  if (lat !== null && Math.abs(lat) > 90) lat /= 100000;
+  if (lng !== null && Math.abs(lng) > 180) lng /= 100000;
+
+  if (lat === null || lng === null) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+  return { lat, lng };
+}
+
+function parsePricesFromGov(station) {
+  const prices = {};
+
+  const fieldMap = {
+    Gazole: ['gazole_prix', 'Gazole', 'gazole'],
+    SP95:   ['sp95_prix', 'SP95', 'sp95'],
+    SP98:   ['sp98_prix', 'SP98', 'sp98'],
+    E10:    ['e10_prix', 'E10', 'e10'],
+    E85:    ['e85_prix', 'E85', 'e85'],
+    GPLc:   ['gplc_prix', 'GPLc', 'gplc'],
+    HVO100: ['hvo100_prix', 'HVO100', 'hvo100'],
+  };
+
+  for (const [fuelName, keys] of Object.entries(fieldMap)) {
+    for (const key of keys) {
+      const raw = station[key];
+      if (raw === null || raw === undefined || raw === '') continue;
+
+      let v = normalizeNumber(raw);
+      if (v === null || v <= 0) continue;
+      if (v > 10) v /= 1000;
+
+      prices[fuelName] = v;
+      break;
+    }
+  }
+
+  if (!Object.keys(prices).length) {
+    const fuels = station.Prix || station.prix || station.carburants || station.prices || [];
+    if (Array.isArray(fuels)) {
+      fuels.forEach((f) => {
+        const name = f['@nom'] || f.nom || f.name || f.type;
+        const val = f['@valeur'] || f.valeur || f.value || f.prix || f.price;
+        if (!name || val === null || val === undefined || val === '') return;
+
+        let price = normalizeNumber(val);
+        if (price === null || price <= 0) return;
+        if (price > 10) price /= 1000;
+
+        prices[name] = price;
+      });
+    }
+  }
+
+  return prices;
+}
 
 async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
   const centerLat = (minLat + maxLat) / 2;
@@ -371,13 +419,15 @@ async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
       `within_distance(geom, geom'POINT(${centerLng} ${centerLat})', ${radiusKm}km)`
     );
 
-    const data = await fetchJsonWithTimeout(url.toString(), {
-      headers: { Accept: 'application/json' },
-    }, 8000);
+    const data = await fetchJsonWithTimeout(
+      url.toString(),
+      { headers: { Accept: 'application/json' } },
+      8000
+    );
 
     return Array.isArray(data?.results) ? data.results : [];
   } catch (err) {
-    console.warn('Primary fuel API query failed, fallback bbox:', err);
+    console.warn('Primary fuel API query failed:', err);
 
     try {
       const url = new URL(GOV_DATASET_URL);
@@ -388,9 +438,11 @@ async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
         `latitude >= ${minLat} AND latitude <= ${maxLat} AND longitude >= ${minLng} AND longitude <= ${maxLng}`
       );
 
-      const data = await fetchJsonWithTimeout(url.toString(), {
-        headers: { Accept: 'application/json' },
-      }, 8000);
+      const data = await fetchJsonWithTimeout(
+        url.toString(),
+        { headers: { Accept: 'application/json' } },
+        8000
+      );
 
       return Array.isArray(data?.results) ? data.results : [];
     } catch (fallbackErr) {
@@ -398,55 +450,6 @@ async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
       return [];
     }
   }
-}
-
-function parsePricesFromGov(station) {
-  const prices = {};
-
-  const fieldMap = {
-    Gazole: ['gazole_prix', 'Gazole', 'gazole'],
-    SP95:   ['sp95_prix', 'SP95', 'sp95'],
-    SP98:   ['sp98_prix', 'SP98', 'sp98'],
-    E10:    ['e10_prix', 'E10', 'e10'],
-    E85:    ['e85_prix', 'E85', 'e85'],
-    GPLc:   ['gplc_prix', 'GPLc', 'gplc'],
-    HVO100: ['hvo100_prix', 'HVO100', 'hvo100'],
-  };
-
-  for (const [fuelName, keys] of Object.entries(fieldMap)) {
-    for (const key of keys) {
-      const raw = station[key];
-      if (raw === null || raw === undefined || raw === '') continue;
-
-      let v = normalizeNumber(raw);
-      if (v === null || v <= 0) continue;
-      if (v > 10) v /= 1000;
-
-      prices[fuelName] = v;
-      break;
-    }
-  }
-
-  // compat ancien format
-  if (!Object.keys(prices).length) {
-    const fuels = station.Prix || station.prix || station.carburants || station.prices || [];
-    if (Array.isArray(fuels)) {
-      fuels.forEach((f) => {
-        const name = f['@nom'] || f.nom || f.name || f.type;
-        const val = f['@valeur'] || f.valeur || f.value || f.prix || f.price;
-
-        if (!name || val === null || val === undefined || val === '') return;
-
-        let price = normalizeNumber(val);
-        if (price === null || price <= 0) return;
-        if (price > 10) price /= 1000;
-
-        prices[name] = price;
-      });
-    }
-  }
-
-  return prices;
 }
 
 function mergeStationsAndPrices(osmStations, govData) {
@@ -467,11 +470,11 @@ function mergeStationsAndPrices(osmStations, govData) {
       gov.nom ||
       'Station';
 
-    const govAddress = buildGovAddress(gov) || gov.adresse || gov.Adresse || '';
+    const govAddress = buildGovAddress(gov) || gov.adresse || '';
     const govServices = parseGovServices(gov);
 
     let best = null;
-    let bestDist = 0.35; // km
+    let bestDist = 0.35;
 
     merged.forEach((s) => {
       if (!s.lat || !s.lng) return;
@@ -508,12 +511,97 @@ function mergeStationsAndPrices(osmStations, govData) {
   return merged;
 }
 
-// ── RENDU MARQUEURS ───────────────────────────
+// ──────────────────────────────────────
+// CHARGEMENT
+// ──────────────────────────────────────
+
+async function loadStationsAlongRoute(routeCoords) {
+  if (!Array.isArray(routeCoords) || !routeCoords.length) return;
+
+  const lngs = routeCoords.map(c => c[0]);
+  const lats = routeCoords.map(c => c[1]);
+
+  await loadStationsInBbox(
+    Math.min(...lats) - 0.15,
+    Math.max(...lats) + 0.15,
+    Math.min(...lngs) - 0.15,
+    Math.max(...lngs) + 0.15
+  );
+}
+
+async function loadStationsNearUser(lat, lng, radiusKm = 15) {
+  const deg = radiusKm / 111;
+  await loadStationsInBbox(lat - deg, lat + deg, lng - deg, lng + deg);
+}
+
+async function loadStationsInBbox(minLat, maxLat, minLng, maxLng) {
+  try {
+    if (typeof showToast === 'function') showToast('Recherche des stations carburant...');
+
+    const [osmRes, govRes] = await Promise.allSettled([
+      fetchStationsFromOSM(minLat, maxLat, minLng, maxLng),
+      fetchPricesGouvernement(minLat, maxLat, minLng, maxLng),
+    ]);
+
+    const osmStations = osmRes.status === 'fulfilled' ? osmRes.value : [];
+    const govPrices = govRes.status === 'fulfilled' ? govRes.value : [];
+
+    if (osmRes.status === 'rejected') console.warn('OSM error:', osmRes.reason);
+    if (govRes.status === 'rejected') console.warn('API carburants error:', govRes.reason);
+
+    stationsData = mergeStationsAndPrices(osmStations, govPrices);
+    window.stationsData = stationsData;
+
+    if (Date.now() < stationClickLockUntil) return;
+    if (!stationsVisible) return;
+
+    clearStationMarkers(false);
+    renderStationMarkers(stationsData);
+
+    if (typeof showToast === 'function') {
+      if (stationsData.length > 0) {
+        const shown = getStationsForCurrentContext(stationsData).length;
+        const isMobile = window.innerWidth <= 768;
+
+        showToast(
+          isMobile && stationsData.length > shown
+            ? `${shown} stations affichées sur ${stationsData.length}`
+            : `${stationsData.length} stations trouvées`
+        );
+      } else {
+        showToast('Aucune station trouvée');
+      }
+    }
+  } catch (err) {
+    console.error('Stations error:', err);
+    if (typeof showToast === 'function') showToast('Erreur lors du chargement des stations');
+  }
+}
+
+// ──────────────────────────────────────
+// RENDU
+// ──────────────────────────────────────
+
+function clearStationMarkers(closePopup = true) {
+  stationMarkers.forEach(({ marker }) => marker.remove());
+  stationMarkers = [];
+
+  if (closePopup) {
+    if (activeStationPopup) {
+      activeStationPopup.remove();
+      activeStationPopup = null;
+    }
+    if (window._activePopup) {
+      window._activePopup.remove();
+      window._activePopup = null;
+    }
+  }
+}
 
 function renderStationMarkers(stations) {
-  if (!stationsVisible) return;
+  if (!stationsVisible || !map) return;
 
-  const visibleStations = getVisibleStations(stations);
+  const visibleStations = getStationsForCurrentContext(stations);
 
   visibleStations.forEach((s) => {
     if (!s.lat || !s.lng) return;
@@ -589,8 +677,6 @@ function renderStationMarkers(stations) {
   });
 }
 
-// ── POPUP DÉTAIL ──────────────────────────────
-
 function openStationPopup(station) {
   stationClickLockUntil = Date.now() + 1200;
   selectedStationId = getStationId(station);
@@ -638,7 +724,7 @@ function openStationPopup(station) {
 
   const fuelsHTML = hasPrices
     ? sortedPriceEntries.map(([fuel, price]) => {
-        const info = FUEL_LABELS[fuel] || { label: fuel, icon: '⛽', color: '#6B7280' };
+        const info = FUEL_LABELS[fuel] || { label: fuel, icon: '⛽' };
         const priceColor = price < 1.75 ? '#10B981' : price < 1.95 ? '#00d4ff' : '#F59E0B';
 
         return `
@@ -678,9 +764,7 @@ function openStationPopup(station) {
 
       ${servicesHTML ? `
         <div style="padding:10px 16px;border-bottom:0.5px solid rgba(255,255,255,0.06)">
-          <div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px">
-            Services
-          </div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px">Services</div>
           <div style="font-size:16px;letter-spacing:3px">${servicesHTML}</div>
         </div>
       ` : ''}
@@ -704,7 +788,6 @@ function openStationPopup(station) {
     offset: [0, -52],
   });
 
-  // empêche Mapbox de décaler la carte automatiquement vers la gauche
   popup._adjustPan = () => {};
 
   popup
@@ -712,8 +795,8 @@ function openStationPopup(station) {
     .setHTML(html)
     .addTo(map);
 
-  window._activePopup = popup;
   activeStationPopup = popup;
+  window._activePopup = popup;
 }
 
 function closeStationPopup() {
@@ -731,22 +814,47 @@ function closeStationPopup() {
 }
 
 function navigateToStation(lat, lng, name) {
-  if (activeStationPopup) {
-    activeStationPopup.remove();
-    activeStationPopup = null;
-  }
-  if (window._activePopup) {
-    window._activePopup.remove();
-    window._activePopup = null;
-  }
+  closeStationPopup();
 
   const input = document.getElementById('search-input');
   if (input) input.value = name;
 
-  calculateRoutes(lat, lng, `${name} (Station essence)`);
+  if (typeof calculateRoutes === 'function') {
+    calculateRoutes(lat, lng, `${name} (Station essence)`);
+  }
 }
 
-// ── ALERTES ROUTE ─────────────────────────────
+function toggleStations() {
+  stationsVisible = !stationsVisible;
+
+  if (stationsVisible) {
+    clearStationMarkers(false);
+    renderStationMarkers(stationsData);
+    refreshStationSelection();
+  } else {
+    clearStationMarkers(true);
+  }
+
+  const btn = document.getElementById('stations-toggle');
+  if (btn) btn.style.opacity = stationsVisible ? '1' : '0.4';
+
+  if (typeof showToast === 'function') {
+    showToast(stationsVisible ? 'Stations affichées' : 'Stations masquées');
+  }
+}
+
+// ──────────────────────────────────────
+// ALERTES STATIONS
+// ──────────────────────────────────────
+
+function isAhead(uLat, uLng, bearing, sLat, sLng) {
+  if (bearing === null || bearing === undefined) return true;
+
+  const angle = (Math.atan2(sLng - uLng, sLat - uLat) * 180 / Math.PI + 360) % 360;
+  const diff = Math.abs(angle - bearing);
+
+  return diff < 80 || diff > 280;
+}
 
 function checkUpcomingStations(userLat, userLng, bearing) {
   if (!navActive || !stationsData.length) return;
@@ -755,6 +863,10 @@ function checkUpcomingStations(userLat, userLng, bearing) {
     const sid = getStationId(s);
 
     if (upcomingAlertShown.has(sid)) return;
+
+    if (ARIA_NAV_SHARED.currentRouteGeoJSON?.geometry?.coordinates?.length) {
+      if (!isStationNearRoute(s, ARIA_NAV_SHARED.currentRouteGeoJSON.geometry.coordinates, 2.5)) return;
+    }
 
     const dist = haversineKm(userLat, userLng, s.lat, s.lng);
     if (dist > 5 || dist < 0.3) return;
@@ -778,74 +890,18 @@ function checkUpcomingStations(userLat, userLng, bearing) {
   });
 }
 
-function isAhead(uLat, uLng, bearing, sLat, sLng) {
-  if (bearing === null || bearing === undefined) return true;
+// ──────────────────────────────────────
+// EXPOSITION GLOBALE
+// ──────────────────────────────────────
 
-  const angle = (Math.atan2(sLng - uLng, sLat - uLat) * 180 / Math.PI + 360) % 360;
-  const diff = Math.abs(angle - bearing);
-
-  return diff < 80 || diff > 280;
-}
-
-// ── TOGGLE STATIONS ───────────────────────────
-
-function toggleStations() {
-  stationsVisible = !stationsVisible;
-
-  if (stationsVisible) {
-    clearStationMarkers(false);
-    renderStationMarkers(stationsData);
-    refreshStationSelection();
-  } else {
-    clearStationMarkers(true);
-  }
-
-  const btn = document.getElementById('stations-toggle');
-  if (btn) btn.style.opacity = stationsVisible ? '1' : '0.4';
-
-  showToast(stationsVisible ? 'Stations affichées' : 'Stations masquées');
-}
-
-function clearStationMarkers(closePopup = true) {
-  stationMarkers.forEach(({ marker }) => marker.remove());
-  stationMarkers = [];
-
-  if (closePopup) {
-    if (activeStationPopup) {
-      activeStationPopup.remove();
-      activeStationPopup = null;
-    }
-    if (window._activePopup) {
-      window._activePopup.remove();
-      window._activePopup = null;
-    }
-  }
-}
-
-// ── UTILITAIRES ───────────────────────────────
-
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) *
-    Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLng / 2) ** 2;
-
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-// ── EXPOSITION GLOBALE ────────────────────────
-// utile si ton script tourne en module ou si les boutons popup utilisent onclick
-
+window.haversineKm = haversineKm;
 window.loadStationsAlongRoute = loadStationsAlongRoute;
 window.loadStationsNearUser = loadStationsNearUser;
 window.loadStationsInBbox = loadStationsInBbox;
+window.renderStationMarkers = renderStationMarkers;
+window.clearStationMarkers = clearStationMarkers;
 window.closeStationPopup = closeStationPopup;
 window.navigateToStation = navigateToStation;
 window.toggleStations = toggleStations;
 window.checkUpcomingStations = checkUpcomingStations;
-window.clearStationMarkers = clearStationMarkers;
+window.stationsData = stationsData;
