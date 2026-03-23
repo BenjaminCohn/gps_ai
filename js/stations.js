@@ -10,15 +10,21 @@ const ARIA_NAV_SHARED = window.ARIA_NAV_SHARED || (window.ARIA_NAV_SHARED = {
 
 let stationMarkers = [];
 let stationsData = [];
-let activeStationPopup = null;
 let upcomingAlertShown = new Set();
 
 let selectedStationId = null;
 let stationClickLockUntil = 0;
 let stationsVisible = true;
 
-const GOV_DATASET_URL =
-  'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records';
+window.stationsData = stationsData;
+
+const GOV_EXPORT_URL =
+  'https://data.economie.gouv.fr/explore/dataset/prix-des-carburants-en-france-flux-instantane-v2/exports/json?lang=fr&timezone=Europe%2FParis';
+
+let govFuelCache = {
+  ts: 0,
+  data: [],
+};
 
 const BRANDS = {
   total:         { color: '#E63B2E', bg: '#FFF0EF', abbr: 'TT', full: 'TotalEnergies' },
@@ -83,7 +89,7 @@ function escapeJsString(str = '') {
     .replace(/\r/g, ' ');
 }
 
-function fetchJsonWithTimeout(url, options = {}, timeoutMs = 8000) {
+function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -175,12 +181,12 @@ function getStationId(station) {
 function getStationsForCurrentContext(stations) {
   let list = [...stations].filter(s => s.lat && s.lng);
 
-  if (navActive && ARIA_NAV_SHARED.currentRouteGeoJSON?.geometry?.coordinates?.length) {
+  if (window.navActive && ARIA_NAV_SHARED.currentRouteGeoJSON?.geometry?.coordinates?.length) {
     const routeCoords = ARIA_NAV_SHARED.currentRouteGeoJSON.geometry.coordinates;
     list = list.filter(s => isStationNearRoute(s, routeCoords, 2.5));
   }
 
-  if (userLocation?.lat && userLocation?.lng) {
+  if (window.userLocation?.lat && window.userLocation?.lng) {
     list.sort((a, b) => {
       const da = haversineKm(userLocation.lat, userLocation.lng, a.lat, a.lng);
       const db = haversineKm(userLocation.lat, userLocation.lng, b.lat, b.lng);
@@ -236,7 +242,26 @@ async function fetchStationsFromOSM(minLat, maxLat, minLng, maxLng) {
       body: 'data=' + encodeURIComponent(query),
     });
 
-    const data = await res.json();
+    if (!res.ok) {
+      console.warn('OSM HTTP error:', res.status);
+      return [];
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
+
+    if (!contentType.includes('application/json')) {
+      console.warn('OSM non-JSON response ignored');
+      return [];
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.warn('OSM JSON parse failed');
+      return [];
+    }
 
     return (data.elements || [])
       .map(el => ({
@@ -265,6 +290,45 @@ async function fetchStationsFromOSM(minLat, maxLat, minLng, maxLng) {
 // ──────────────────────────────────────
 // API CARBURANTS
 // ──────────────────────────────────────
+
+async function fetchGovFuelStationsCached() {
+  const fresh = govFuelCache.data.length && (Date.now() - govFuelCache.ts) < 10 * 60 * 1000;
+  if (fresh) return govFuelCache.data;
+
+  const res = await fetch(GOV_EXPORT_URL, {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Fuel export HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  govFuelCache = {
+    ts: Date.now(),
+    data: Array.isArray(data) ? data : [],
+  };
+
+  return govFuelCache.data;
+}
+
+function pickGovCoords(row) {
+  const lat =
+    normalizeNumber(row.latitude) ??
+    normalizeNumber(row.geom?.lat) ??
+    normalizeNumber(row.geom?.coordinates?.[1]) ??
+    normalizeNumber(row.geo_point_2d?.lat);
+
+  const lng =
+    normalizeNumber(row.longitude) ??
+    normalizeNumber(row.geom?.lon) ??
+    normalizeNumber(row.geom?.lng) ??
+    normalizeNumber(row.geom?.coordinates?.[0]) ??
+    normalizeNumber(row.geo_point_2d?.lon);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+}
 
 function buildGovAddress(gov) {
   return [
@@ -303,37 +367,6 @@ function parseGovServices(gov) {
   });
 
   return uniq(out);
-}
-
-function extractGovLatLng(gov) {
-  let lat =
-    normalizeNumber(gov.latitude) ??
-    normalizeNumber(gov.Latitude) ??
-    normalizeNumber(gov.lat) ??
-    normalizeNumber(gov.geom?.lat) ??
-    normalizeNumber(gov.geo_point_2d?.lat);
-
-  let lng =
-    normalizeNumber(gov.longitude) ??
-    normalizeNumber(gov.Longitude) ??
-    normalizeNumber(gov.lng) ??
-    normalizeNumber(gov.lon) ??
-    normalizeNumber(gov.geom?.lon) ??
-    normalizeNumber(gov.geom?.lng) ??
-    normalizeNumber(gov.geo_point_2d?.lon);
-
-  if ((lat === null || lng === null) && Array.isArray(gov.geom?.coordinates)) {
-    lng = normalizeNumber(gov.geom.coordinates[0]);
-    lat = normalizeNumber(gov.geom.coordinates[1]);
-  }
-
-  if (lat !== null && Math.abs(lat) > 90) lat /= 100000;
-  if (lng !== null && Math.abs(lng) > 180) lng /= 100000;
-
-  if (lat === null || lng === null) return null;
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-
-  return { lat, lng };
 }
 
 function parsePricesFromGov(station) {
@@ -384,72 +417,19 @@ function parsePricesFromGov(station) {
 }
 
 async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
-  const centerLat = (minLat + maxLat) / 2;
-  const centerLng = (minLng + maxLng) / 2;
+  const all = await fetchGovFuelStationsCached();
 
-  const diagonalKm = haversineKm(minLat, minLng, maxLat, maxLng);
-  const radiusKm = Math.max(10, Math.min(45, Math.ceil(diagonalKm / 2) + 5));
+  return all.filter((row) => {
+    const c = pickGovCoords(row);
+    if (!c) return false;
 
-  const fields = [
-    'id',
-    'enseigne',
-    'enseignes',
-    'adresse',
-    'cp',
-    'ville',
-    'latitude',
-    'longitude',
-    'geom',
-    'services',
-    'gazole_prix',
-    'sp95_prix',
-    'sp98_prix',
-    'e10_prix',
-    'e85_prix',
-    'gplc_prix',
-    'hvo100_prix',
-  ].join(',');
-
-  try {
-    const url = new URL(GOV_DATASET_URL);
-    url.searchParams.set('select', fields);
-    url.searchParams.set('limit', '200');
-    url.searchParams.set(
-      'where',
-      `within_distance(geom, geom'POINT(${centerLng} ${centerLat})', ${radiusKm}km)`
+    return (
+      c.lat >= minLat &&
+      c.lat <= maxLat &&
+      c.lng >= minLng &&
+      c.lng <= maxLng
     );
-
-    const data = await fetchJsonWithTimeout(
-      url.toString(),
-      { headers: { Accept: 'application/json' } },
-      8000
-    );
-
-    return Array.isArray(data?.results) ? data.results : [];
-  } catch (err) {
-    console.warn('Primary fuel API query failed:', err);
-
-    try {
-      const url = new URL(GOV_DATASET_URL);
-      url.searchParams.set('select', fields);
-      url.searchParams.set('limit', '200');
-      url.searchParams.set(
-        'where',
-        `latitude >= ${minLat} AND latitude <= ${maxLat} AND longitude >= ${minLng} AND longitude <= ${maxLng}`
-      );
-
-      const data = await fetchJsonWithTimeout(
-        url.toString(),
-        { headers: { Accept: 'application/json' } },
-        8000
-      );
-
-      return Array.isArray(data?.results) ? data.results : [];
-    } catch (fallbackErr) {
-      console.warn('Fallback fuel API failed:', fallbackErr);
-      return [];
-    }
-  }
+  });
 }
 
 function mergeStationsAndPrices(osmStations, govData) {
@@ -458,7 +438,7 @@ function mergeStationsAndPrices(osmStations, govData) {
   if (!Array.isArray(govData) || !govData.length) return merged;
 
   govData.forEach((gov) => {
-    const coords = extractGovLatLng(gov);
+    const coords = pickGovCoords(gov);
     if (!coords) return;
 
     const parsedPrices = parsePricesFromGov(gov);
@@ -582,24 +562,17 @@ async function loadStationsInBbox(minLat, maxLat, minLng, maxLng) {
 // RENDU
 // ──────────────────────────────────────
 
-function clearStationMarkers(closePopup = true) {
+function clearStationMarkers(closeDrawer = true) {
   stationMarkers.forEach(({ marker }) => marker.remove());
   stationMarkers = [];
 
-  if (closePopup) {
-    if (activeStationPopup) {
-      activeStationPopup.remove();
-      activeStationPopup = null;
-    }
-    if (window._activePopup) {
-      window._activePopup.remove();
-      window._activePopup = null;
-    }
+  if (closeDrawer) {
+    closeStationPopup();
   }
 }
 
 function renderStationMarkers(stations) {
-  if (!stationsVisible || !map) return;
+  if (!stationsVisible || !window.map) return;
 
   const visibleStations = getStationsForCurrentContext(stations);
 
@@ -678,30 +651,15 @@ function renderStationMarkers(stations) {
 }
 
 function openStationPopup(station) {
-  stationClickLockUntil = Date.now() + 1200;
   selectedStationId = getStationId(station);
-
-  if (activeStationPopup) {
-    activeStationPopup.remove();
-    activeStationPopup = null;
-  }
-  if (window._activePopup) {
-    window._activePopup.remove();
-    window._activePopup = null;
-  }
-
   refreshStationSelection();
+
+  const drawer = document.getElementById('station-drawer');
+  if (!drawer) return;
 
   const brand = getBrand(station.brand || station.name);
   const prices = station.prices || {};
   const hasPrices = Object.keys(prices).length > 0;
-
-  const distStr = userLocation
-    ? (() => {
-        const d = haversineKm(userLocation.lat, userLocation.lng, station.lat, station.lng);
-        return d < 1 ? `${Math.round(d * 1000)}m` : `${d.toFixed(1)}km`;
-      })()
-    : '';
 
   const serviceIcons = {
     Toilettes: '🚻',
@@ -723,90 +681,40 @@ function openStationPopup(station) {
   });
 
   const fuelsHTML = hasPrices
-    ? sortedPriceEntries.map(([fuel, price]) => {
-        const info = FUEL_LABELS[fuel] || { label: fuel, icon: '⛽' };
-        const priceColor = price < 1.75 ? '#10B981' : price < 1.95 ? '#00d4ff' : '#F59E0B';
-
-        return `
-          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:0.5px solid rgba(255,255,255,0.05)">
-            <span style="font-size:14px;width:18px">${info.icon}</span>
-            <span style="flex:1;font-size:13px;color:rgba(255,255,255,0.8);font-weight:500">${escapeHtml(info.label)}</span>
-            <span style="font-family:'DM Mono',monospace;font-size:15px;font-weight:600;color:${priceColor}">€ ${price.toFixed(3)}</span>
-          </div>
-        `;
-      }).join('')
-    : `
-      <div style="font-size:12px;color:rgba(255,255,255,0.3);text-align:center;padding:10px 0">
-        Prix non disponibles
+    ? sortedPriceEntries.map(([fuel, price]) => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+        <span>${escapeHtml((FUEL_LABELS[fuel] || { label: fuel }).label)}</span>
+        <strong>€ ${price.toFixed(3)}</strong>
       </div>
-    `;
+    `).join('')
+    : `<div style="opacity:.6;padding:10px 0">Prix non disponibles</div>`;
 
   const safeName = escapeJsString(station.name || brand.full || 'Station');
-  const safeTitle = escapeHtml(brand.full || station.name || 'Station');
-  const safeAddress = escapeHtml(station.address || '');
-  const safeOpeningHours = escapeHtml(station.openingHours || '');
 
-  const html = `
-    <div style="font-family:'Syne',sans-serif;background:#0a0f1e;border-radius:18px;overflow:hidden;width:270px;border:0.5px solid rgba(255,255,255,0.1)">
-      <div style="background:${brand.color};padding:14px 16px">
-        <div style="font-size:17px;font-weight:800;color:white">${safeTitle}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.7);margin-top:3px">⛽ Station carburant${distStr ? ' · ' + distStr : ''}</div>
-        ${safeAddress ? `<div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:2px">📍 ${safeAddress}</div>` : ''}
-        ${safeOpeningHours ? `<div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:2px">🕐 ${safeOpeningHours}</div>` : ''}
-      </div>
-
-      <div style="padding:12px 16px;border-bottom:0.5px solid rgba(255,255,255,0.06)">
-        <div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px;font-weight:700">
-          Carburants & Prix
-        </div>
-        ${fuelsHTML}
-      </div>
-
-      ${servicesHTML ? `
-        <div style="padding:10px 16px;border-bottom:0.5px solid rgba(255,255,255,0.06)">
-          <div style="font-size:9px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px">Services</div>
-          <div style="font-size:16px;letter-spacing:3px">${servicesHTML}</div>
-        </div>
-      ` : ''}
-
-      <div style="display:flex;gap:8px;padding:12px 16px">
-        <button onclick="navigateToStation(${station.lat}, ${station.lng}, '${safeName}')" style="flex:1;background:linear-gradient(135deg,#0050cc,#003db5);border:none;border-radius:10px;padding:10px;font-family:'Syne',sans-serif;font-size:13px;font-weight:700;color:white;cursor:pointer">
-          → Y aller
-        </button>
-        <button onclick="closeStationPopup()" style="flex:1;background:rgba(255,255,255,0.05);border:0.5px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px;font-family:'Syne',sans-serif;font-size:13px;color:rgba(255,255,255,0.5);cursor:pointer">
-          Fermer
-        </button>
+  drawer.innerHTML = `
+    <div style="background:${brand.color};padding:14px 16px;font-weight:800;font-size:18px;color:#fff">
+      ${escapeHtml(brand.full || station.name || 'Station')}
+    </div>
+    <div style="padding:14px 16px;color:#fff">
+      ${station.address ? `<div style="font-size:12px;opacity:.7;margin-bottom:8px">📍 ${escapeHtml(station.address)}</div>` : ''}
+      <div style="font-size:11px;opacity:.45;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:8px">Carburants & Prix</div>
+      ${fuelsHTML}
+      ${servicesHTML ? `<div style="margin-top:12px;font-size:18px;letter-spacing:4px">${servicesHTML}</div>` : ''}
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button onclick="navigateToStation(${station.lat}, ${station.lng}, '${safeName}')" style="flex:1;background:#0b43ff;color:#fff;border:none;border-radius:14px;padding:12px 14px;font-weight:700">→ Y aller</button>
+        <button onclick="closeStationPopup()" style="flex:1;background:rgba(255,255,255,.06);color:rgba(255,255,255,.75);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:12px 14px">Fermer</button>
       </div>
     </div>
   `;
 
-  const popup = new mapboxgl.Popup({
-    closeButton: false,
-    closeOnClick: false,
-    maxWidth: '290px',
-    anchor: 'bottom',
-    offset: [0, -52],
-  });
-
-  popup._adjustPan = () => {};
-
-  popup
-    .setLngLat([station.lng, station.lat])
-    .setHTML(html)
-    .addTo(map);
-
-  activeStationPopup = popup;
-  window._activePopup = popup;
+  drawer.classList.remove('hidden');
 }
 
 function closeStationPopup() {
-  if (activeStationPopup) {
-    activeStationPopup.remove();
-    activeStationPopup = null;
-  }
-  if (window._activePopup) {
-    window._activePopup.remove();
-    window._activePopup = null;
+  const drawer = document.getElementById('station-drawer');
+  if (drawer) {
+    drawer.classList.add('hidden');
+    drawer.innerHTML = '';
   }
 
   selectedStationId = null;
@@ -857,7 +765,7 @@ function isAhead(uLat, uLng, bearing, sLat, sLng) {
 }
 
 function checkUpcomingStations(userLat, userLng, bearing) {
-  if (!navActive || !stationsData.length) return;
+  if (!window.navActive || !stationsData.length) return;
 
   stationsData.forEach((s) => {
     const sid = getStationId(s);
@@ -904,4 +812,3 @@ window.closeStationPopup = closeStationPopup;
 window.navigateToStation = navigateToStation;
 window.toggleStations = toggleStations;
 window.checkUpcomingStations = checkUpcomingStations;
-window.stationsData = stationsData;

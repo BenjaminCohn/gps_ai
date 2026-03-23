@@ -497,3 +497,47 @@ html, body {
   justify-content: center;
   flex-shrink: 0;
 }
+
+body.nav-mode #bottom-sheet {
+  height: 210px;
+}
+
+body.nav-mode #state-nav .routes-wrap,
+body.nav-mode #state-nav .stats-line,
+body.nav-mode #state-nav .ai-bar {
+  display: none;
+}
+
+body.nav-mode #state-nav .stop-nav-wrap {
+  margin-top: 10px;
+}
+
+body.nav-mode #weather-float {
+  top: 118px;
+}
+
+body.nav-mode #map {
+  filter: none;
+}
+/*speed limit*/ 
+.speed-limit {
+  position: fixed;
+  left: 18px;
+  bottom: 128px;
+  z-index: 9999;
+  width: 70px;
+  height: 70px;
+  border-radius: 50%;
+  background: #fff;
+  color: #111;
+  border: 6px solid #d11;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 800 26px/1 'Syne', sans-serif;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+}
+
+.speed-limit.hidden {
+  display: none;
+}
