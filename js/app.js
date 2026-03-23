@@ -52,10 +52,10 @@ async function startApp() {
   // Supabase communauté temps réel
   if (typeof initSupabase === 'function') initSupabase();
 
-  // Service Worker PWA
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  // Service Worker PWA — désactivé temporairement (cause des bugs de popup)
+  // if ('serviceWorker' in navigator) {
+  //   navigator.serviceWorker.register('sw.js').catch(() => {});
+  // }
 
   // Géolocalisation + météo + stations
   navigator.geolocation?.getCurrentPosition(
