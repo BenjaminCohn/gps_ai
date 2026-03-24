@@ -271,3 +271,21 @@ if (!window.__ARIA_NAV_LOADED__) {
     window.startApp = startApp;
   })();
 }
+// --- SHIM: startSearch() pour le bouton + ARIA ---
+if (typeof window.startSearch !== 'function') {
+  window.startSearch = async function startSearch() {
+    const q = document.getElementById('search-input')?.value?.trim();
+    if (!q) {
+      if (typeof window.showToast === 'function') window.showToast('Entrez une destination');
+      return;
+    }
+
+    // Priorité : la fonction que tu utilises déjà dans aria.js
+    if (typeof window.searchPlaces === 'function') {
+      return await window.searchPlaces(q);
+    }
+
+    console.warn('startSearch: searchPlaces() introuvable');
+    if (typeof window.showToast === 'function') window.showToast('Recherche indisponible');
+  };
+}
