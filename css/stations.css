@@ -308,3 +308,85 @@
   font-size: 10px;
   flex-shrink: 0;
 }
+
+/* ──────────────────────────────────────
+   FIX UI STACKING (Waze-like)
+   ────────────────────────────────────── */
+
+/* La carte doit être tout au fond */
+#map{
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+/* HUD du haut toujours au-dessus */
+#top-hud{
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+}
+
+/* Alerts au-dessus de la carte mais sous le HUD si besoin */
+#alerts-strip{
+  position: fixed;
+  top: 108px;
+  left: 0;
+  right: 0;
+  z-index: 25;
+  pointer-events: none;
+}
+#alerts-strip *{ pointer-events: auto; }
+
+/* Météo au-dessus de la carte */
+#weather-float{
+  position: fixed;
+  left: 14px;
+  top: 160px;
+  z-index: 25;
+}
+
+/* Boutons flottants au-dessus */
+#recenter-btn,
+#stations-toggle,
+#report-btn{
+  position: fixed;
+  z-index: 45;
+}
+
+/* Bottom sheet toujours en bas */
+#bottom-sheet{
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+}
+
+/* Drawer station : en bas (pas au milieu), au-dessus du bottom sheet */
+#station-drawer{
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 90px;              /* laisse respirer le bottom sheet */
+  z-index: 60;
+  max-height: 55vh;
+  overflow: auto;
+  border-radius: 22px;
+  background: rgba(6,8,15,0.96);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+}
+
+/* Sur mobile, évite que le drawer mange tout */
+@media (max-width: 768px){
+  #station-drawer{
+    left: 10px;
+    right: 10px;
+    bottom: 96px;
+    max-height: 52vh;
+  }
+}
