@@ -21,6 +21,10 @@ function ariaWarn(...args) {
   console.warn('[ARIA]', ...args);
 }
 
+function getNavStateSafe() {
+  return !!window.navActive;
+}
+
 function setAriaMsg(state, message) {
   const idleEl = document.getElementById('aria-idle-msg');
   const navEl = document.getElementById('aria-nav-msg');
@@ -28,27 +32,16 @@ function setAriaMsg(state, message) {
   if (state === 'idle' && idleEl) idleEl.textContent = message;
   if (state === 'nav' && navEl) navEl.textContent = message;
 
-  if (idleEl && state !== 'idle' && !navActive) {
+  if (idleEl && state !== 'idle' && !getNavStateSafe()) {
     idleEl.textContent = message;
   }
-  if (navEl && state !== 'nav' && window.navActive) {
+  if (navEl && state !== 'nav' && getNavStateSafe()) {
     navEl.textContent = message;
   }
 }
 
 function getCurrentAriaState() {
-  return window.navActive ? 'nav' : 'idle';
-}
-
-function ariaSafeCall(fn, ...args) {
-  try {
-    if (typeof fn === 'function') {
-      return fn(...args);
-    }
-  } catch (err) {
-    ariaWarn('call error:', err);
-  }
-  return undefined;
+  return getNavStateSafe() ? 'nav' : 'idle';
 }
 
 function ariaHasSpeechSynthesis() {
@@ -66,11 +59,21 @@ function normalizeVoiceText(text = '') {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’']/g, "'")
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
 function includesAny(text, list) {
   return list.some(item => text.includes(item));
+}
+
+function updateMicUI(isActive) {
+  const micBtn = document.getElementById('mic-btn');
+  if (!micBtn) return;
+
+  micBtn.classList.toggle('active', !!isActive);
+  micBtn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
 }
 
 // ──────────────────────────────────────
@@ -104,7 +107,7 @@ function speakARIA(text, options = {}) {
   if (!text || !ariaHasSpeechSynthesis()) return;
 
   const now = Date.now();
-  if (ariaSpeechQueueLock && now - ariaLastSpeechAt < 400) return;
+  if (ariaSpeechQueueLock && now - ariaLastSpeechAt < 350) return;
 
   ariaLastSpeechAt = now;
   ariaSpeechQueueLock = true;
@@ -192,17 +195,9 @@ function initARIA() {
   }
 }
 
-function updateMicUI(isActive) {
-  const micBtn = document.getElementById('mic-btn');
-  if (!micBtn) return;
-
-  micBtn.classList.toggle('active', !!isActive);
-  micBtn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-}
-
 function toggleMic() {
   if (!ariaRecognition) {
-    showToast?.('Commande vocale non disponible sur cet appareil');
+    typeof showToast === 'function' && showToast('Commande vocale non disponible sur cet appareil');
     return;
   }
 
@@ -218,7 +213,43 @@ function toggleMic() {
 }
 
 // ──────────────────────────────────────
-// COMMANDES VOCALES
+// PARSING COMMANDE
+// ──────────────────────────────────────
+
+function extractDestinationFromSpeech(rawText = '') {
+  const raw = String(rawText || '').trim();
+  if (!raw) return '';
+
+  const patterns = [
+    /^(?:aria[\s,]+)?je veux aller\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je veux aller au\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je veux aller a\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je vais a\s+(.+)$/i,
+    /^(?:aria[\s,]+)?aller\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?va\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?vas\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?navigue\s+(?:vers|a|à|au|aux)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?emmene[-\s]?moi\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?emmène[-\s]?moi\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?conduis[-\s]?moi\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?destination\s+(.+)$/i,
+    /^(?:aria[\s,]+)?cherche\s+(.+)$/i,
+    /^(?:aria[\s,]+)?itineraire\s+(?:pour|vers)?\s+(.+)$/i,
+    /^(?:aria[\s,]+)?itinéraire\s+(?:pour|vers)?\s+(.+)$/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return '';
+}
+
+// ──────────────────────────────────────
+// ACTIONS
 // ──────────────────────────────────────
 
 async function executeARIAAction(action) {
@@ -240,7 +271,15 @@ async function executeARIAAction(action) {
           return true;
         }
 
-        showToast?.('Recherche indisponible');
+        const input = document.getElementById('search-input');
+        if (input) input.value = query;
+
+        if (typeof window.startSearch === 'function') {
+          await window.startSearch();
+          return true;
+        }
+
+        typeof showToast === 'function' && showToast('Recherche indisponible');
         return false;
       }
 
@@ -266,13 +305,13 @@ async function executeARIAAction(action) {
 
       case 'start-navigation': {
         if (typeof window.startNavigation === 'function') {
-          window.startNavigation();
+          await window.startNavigation();
           setAriaMsg('nav', 'Navigation démarrée.');
           speakARIA('Navigation démarrée.');
           return true;
         }
 
-        showToast?.('Démarrage navigation indisponible');
+        typeof showToast === 'function' && showToast('Démarrage navigation indisponible');
         return false;
       }
 
@@ -284,7 +323,7 @@ async function executeARIAAction(action) {
           return true;
         }
 
-        showToast?.('Arrêt navigation indisponible');
+        typeof showToast === 'function' && showToast('Arrêt navigation indisponible');
         return false;
       }
 
@@ -296,7 +335,7 @@ async function executeARIAAction(action) {
           return true;
         }
 
-        showToast?.('Annulation indisponible');
+        typeof showToast === 'function' && showToast('Annulation indisponible');
         return false;
       }
 
@@ -343,6 +382,10 @@ async function executeARIAAction(action) {
   }
 }
 
+// ──────────────────────────────────────
+// COMMANDES VOCALES
+// ──────────────────────────────────────
+
 async function handleVoiceCommand(transcript) {
   const raw = String(transcript || '').trim();
   const text = normalizeVoiceText(raw);
@@ -353,75 +396,67 @@ async function handleVoiceCommand(transcript) {
 
   setAriaMsg(getCurrentAriaState(), `J'ai entendu : "${raw}"`);
 
-  // arrêt navigation
   if (
     includesAny(text, [
       'arrete la navigation',
       'stop navigation',
       'arreter la navigation',
       'annule la navigation',
-      'quitte la navigation',
+      'quitte la navigation'
     ])
   ) {
     await executeARIAAction({ type: 'stop-navigation' });
     return;
   }
 
-  // démarrer navigation
   if (
     includesAny(text, [
       'demarre la navigation',
       'lance la navigation',
       'commence la navigation',
-      'demarrer la navigation',
+      'demarrer la navigation'
     ])
   ) {
     await executeARIAAction({ type: 'start-navigation' });
     return;
   }
 
-  // annuler itinéraire
   if (
     includesAny(text, [
       'annule litineraire',
       'annule l itineraire',
       'supprime litineraire',
       'supprime l itineraire',
-      'annule le trajet',
+      'annule le trajet'
     ])
   ) {
     await executeARIAAction({ type: 'cancel-route' });
     return;
   }
 
-  // stations
   if (
     includesAny(text, [
       'masque les stations',
       'affiche les stations',
       'cache les stations',
-      'montre les stations',
+      'montre les stations'
     ])
   ) {
     await executeARIAAction({ type: 'toggle-stations' });
     return;
   }
 
-  // recadrage carte
   if (
     includesAny(text, [
       'recentre la carte',
-      'recentre la carte',
       'centre la carte',
-      'recentre',
-      'recentre',
+      'recentre'
     ])
   ) {
     await executeARIAAction({ type: 'recenter' });
     return;
   }
 
-  // destinations rapides
   if (includesAny(text, ['maison'])) {
     await executeARIAAction({ type: 'quick-destination', value: 'Maison' });
     return;
@@ -438,7 +473,7 @@ async function handleVoiceCommand(transcript) {
       'essence',
       'pompe a essence',
       'pompe essence',
-      'station service',
+      'station service'
     ])
   ) {
     await executeARIAAction({ type: 'quick-destination', value: 'Station essence proche' });
@@ -450,14 +485,13 @@ async function handleVoiceCommand(transcript) {
       'restaurant',
       'manger',
       'je veux manger',
-      'resto',
+      'resto'
     ])
   ) {
     await executeARIAAction({ type: 'quick-destination', value: 'Restaurant proche' });
     return;
   }
 
-  // signalements
   if (includesAny(text, ['signale un accident', 'accident'])) {
     await executeARIAAction({ type: 'report', reportType: 'accident' });
     return;
@@ -478,32 +512,20 @@ async function handleVoiceCommand(transcript) {
     return;
   }
 
-  // "va à ..."
-  const goToPatterns = [
-    /^va a (.+)$/i,
-    /^aller a (.+)$/i,
-    /^navigue vers (.+)$/i,
-    /^emmene moi a (.+)$/i,
-    /^conduis moi a (.+)$/i,
-    /^destination (.+)$/i,
-    /^cherche (.+)$/i,
-  ];
-
-  for (const pattern of goToPatterns) {
-    const match = raw.match(pattern);
-    if (match && match[1]) {
-      await executeARIAAction({
-        type: 'search',
-        query: match[1].trim(),
-      });
-      return;
-    }
+  const destination = extractDestinationFromSpeech(raw);
+  if (destination) {
+    await executeARIAAction({
+      type: 'search',
+      query: destination
+    });
+    return;
   }
 
-  // fallback = recherche brute
-  if (typeof window.searchPlaces === 'function') {
-    speakARIA(`Je cherche ${raw}.`);
-    await window.searchPlaces(raw);
+  if (raw.length >= 3) {
+    await executeARIAAction({
+      type: 'search',
+      query: raw
+    });
     return;
   }
 
@@ -511,7 +533,7 @@ async function handleVoiceCommand(transcript) {
 }
 
 // ──────────────────────────────────────
-// ÉVÉNEMENTS NARRATION
+// ALERTES / NARRATION
 // ──────────────────────────────────────
 
 function ariaOnNavStart(destName, arrivalTime) {
