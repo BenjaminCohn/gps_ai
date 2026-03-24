@@ -1,331 +1,557 @@
 // ═══════════════════════════════════════
-//  ARIA GPS — IA Vocale Premium
+//  ARIA GPS — Voix & Assistant
 // ═══════════════════════════════════════
 
-let recognition    = null;
-let synthesis      = window.speechSynthesis;
-let micActive      = false;
-let ariaVoice      = null;
-let isARIASpeaking = false;
-let conversationHistory = [];
-let routeContext = {
-  destination: null, eta: null, distanceLeft: null,
-  currentSpeed: null, weather: null, alerts: [], fuelCost: null,
-};
+let ariaRecognition = null;
+let ariaListening = false;
+let ariaVoices = [];
+let ariaPreferredVoice = null;
+let ariaLastSpeechAt = 0;
+let ariaSpeechQueueLock = false;
 
-// ── INITIALISATION ────────────────────────────
+// ──────────────────────────────────────
+// HELPERS
+// ──────────────────────────────────────
+
+function ariaLog(...args) {
+  console.log('[ARIA]', ...args);
+}
+
+function ariaWarn(...args) {
+  console.warn('[ARIA]', ...args);
+}
+
+function setAriaMsg(state, message) {
+  const idleEl = document.getElementById('aria-idle-msg');
+  const navEl = document.getElementById('aria-nav-msg');
+
+  if (state === 'idle' && idleEl) idleEl.textContent = message;
+  if (state === 'nav' && navEl) navEl.textContent = message;
+
+  if (idleEl && state !== 'idle' && !navActive) {
+    idleEl.textContent = message;
+  }
+  if (navEl && state !== 'nav' && window.navActive) {
+    navEl.textContent = message;
+  }
+}
+
+function getCurrentAriaState() {
+  return window.navActive ? 'nav' : 'idle';
+}
+
+function ariaSafeCall(fn, ...args) {
+  try {
+    if (typeof fn === 'function') {
+      return fn(...args);
+    }
+  } catch (err) {
+    ariaWarn('call error:', err);
+  }
+  return undefined;
+}
+
+function ariaHasSpeechSynthesis() {
+  return typeof window !== 'undefined' && 'speechSynthesis' in window;
+}
+
+function ariaHasRecognition() {
+  return typeof window !== 'undefined' && (
+    'SpeechRecognition' in window || 'webkitSpeechRecognition' in window
+  );
+}
+
+function normalizeVoiceText(text = '') {
+  return String(text)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function includesAny(text, list) {
+  return list.some(item => text.includes(item));
+}
+
+// ──────────────────────────────────────
+// VOIX
+// ──────────────────────────────────────
+
+function loadAriaVoices() {
+  if (!ariaHasSpeechSynthesis()) return;
+
+  ariaVoices = window.speechSynthesis.getVoices() || [];
+
+  const preferred = ariaVoices.find(v =>
+    v.lang?.toLowerCase().startsWith('fr') &&
+    (
+      normalizeVoiceText(v.name).includes('google') ||
+      normalizeVoiceText(v.name).includes('audrey') ||
+      normalizeVoiceText(v.name).includes('marie') ||
+      normalizeVoiceText(v.name).includes('hortense') ||
+      normalizeVoiceText(v.name).includes('fr')
+    )
+  );
+
+  ariaPreferredVoice =
+    preferred ||
+    ariaVoices.find(v => v.lang?.toLowerCase().startsWith('fr')) ||
+    ariaVoices[0] ||
+    null;
+}
+
+function speakARIA(text, options = {}) {
+  if (!text || !ariaHasSpeechSynthesis()) return;
+
+  const now = Date.now();
+  if (ariaSpeechQueueLock && now - ariaLastSpeechAt < 400) return;
+
+  ariaLastSpeechAt = now;
+  ariaSpeechQueueLock = true;
+
+  try {
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(String(text));
+    utterance.lang = 'fr-FR';
+    utterance.rate = options.rate ?? 1.0;
+    utterance.pitch = options.pitch ?? 1.0;
+    utterance.volume = options.volume ?? 1.0;
+
+    if (ariaPreferredVoice) {
+      utterance.voice = ariaPreferredVoice;
+    }
+
+    utterance.onend = () => {
+      ariaSpeechQueueLock = false;
+    };
+
+    utterance.onerror = () => {
+      ariaSpeechQueueLock = false;
+    };
+
+    window.speechSynthesis.speak(utterance);
+  } catch (err) {
+    ariaSpeechQueueLock = false;
+    ariaWarn('speak error:', err);
+  }
+}
+
+// ──────────────────────────────────────
+// INIT
+// ──────────────────────────────────────
 
 function initARIA() {
-  initVoiceSynthesis();
-  initSpeechRecognition();
-  conversationHistory = [
-    { role: 'user', content: buildSystemContext() },
-    { role: 'assistant', content: 'Bonjour ! Je suis ARIA, votre assistante de navigation. Ou souhaitez-vous aller ?' },
-  ];
-}
-
-function buildSystemContext() {
-  return `Tu es ARIA, une assistante GPS française chaleureuse et très compétente intégrée dans ARIA GPS.
-Tu parles en français naturel, tu es positive et rassurante, concise à l'oral (max 2 phrases).
-Tu préviens les dangers à l'avance. Tu demandes comment va le conducteur toutes les 2 heures.
-Tu comprends toute demande liée à : navigation, météo, signalement, stations essence, pauses, heure arrivée.
-Réponds TOUJOURS en JSON avec ce format exact sans aucun texte avant ou après :
-{"message":"réponse courte pour la voix","action":"navigate|stop_nav|report|find_station|none","action_data":"destination si action=navigate sinon null","display_msg":"message affiché dans la bulle plus détaillé"}`;
-}
-
-function buildSystemPromptWithContext() {
-  let ctx = buildSystemContext();
-  ctx += '\n\nCONTEXTE ROUTE EN COURS:\n';
-  ctx += routeContext.destination  ? 'Destination: ' + routeContext.destination + '\n' : 'Pas de navigation active.\n';
-  ctx += routeContext.eta          ? 'ETA: ' + routeContext.eta + '\n' : '';
-  ctx += routeContext.distanceLeft ? 'Distance restante: ' + routeContext.distanceLeft + '\n' : '';
-  ctx += routeContext.currentSpeed ? 'Vitesse: ' + routeContext.currentSpeed + ' km/h\n' : '';
-  ctx += routeContext.weather      ? 'Meteo: ' + routeContext.weather + '\n' : '';
-  ctx += routeContext.fuelCost     ? 'Cout essence: ' + routeContext.fuelCost + '\n' : '';
-  if (routeContext.alerts.length)  ctx += 'Alertes: ' + routeContext.alerts.join(', ') + '\n';
-  return ctx;
-}
-
-// ── SYNTHESE VOCALE ───────────────────────────
-
-function initVoiceSynthesis() {
-  const load = () => {
-    const voices = synthesis.getVoices();
-    ariaVoice = voices.find(v => v.lang === 'fr-FR' && v.name.includes('Google'))
-      || voices.find(v => v.lang === 'fr-FR')
-      || voices.find(v => v.lang.startsWith('fr'))
-      || voices[0];
-  };
-  load();
-  if (synthesis.onvoiceschanged !== undefined) synthesis.onvoiceschanged = load;
-}
-
-async function speakARIA(text) {
-  const clean = text.replace(/[\u{1F000}-\u{1FFFF}]|[\u2600-\u27BF]/gu, '').trim();
-  const elKey = ARIA_CONFIG.ELEVENLABS_KEY || '';
-  if (elKey && !elKey.includes('VOTRE') && elKey.length > 10) {
-    const ok = await speakElevenLabs(clean);
-    if (ok) return;
-  }
-  speakWebSpeech(clean);
-}
-
-async function speakElevenLabs(text) {
   try {
-    isARIASpeaking = true;
-    const voiceId = ARIA_CONFIG.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB';
-    const res = await fetch('https://api.elevenlabs.io/v1/text-to-speech/' + voiceId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'xi-api-key': ARIA_CONFIG.ELEVENLABS_KEY },
-      body: JSON.stringify({
-        text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: { stability: 0.6, similarity_boost: 0.8, style: 0.2, use_speaker_boost: true },
-      }),
-    });
-    if (!res.ok) throw new Error('ElevenLabs ' + res.status);
-    const blob  = await res.blob();
-    const url   = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => { isARIASpeaking = false; URL.revokeObjectURL(url); };
-    await audio.play();
-    return true;
-  } catch { isARIASpeaking = false; return false; }
-}
+    loadAriaVoices();
 
-function speakWebSpeech(text) {
-  if (!synthesis) return;
-  synthesis.cancel();
-  isARIASpeaking = true;
-  const utt    = new SpeechSynthesisUtterance(text);
-  utt.voice    = ariaVoice;
-  utt.lang     = 'fr-FR';
-  utt.rate     = 0.92;
-  utt.pitch    = 1.05;
-  utt.volume   = 1.0;
-  utt.onend    = () => { isARIASpeaking = false; };
-  synthesis.speak(utt);
-}
-
-// ── RECONNAISSANCE VOCALE ─────────────────────
-
-function initSpeechRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return;
-  recognition = new SR();
-  recognition.lang            = 'fr-FR';
-  recognition.continuous      = false;
-  recognition.interimResults  = true;
-
-  recognition.onresult = (e) => {
-    let interim = '', final = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) final   += e.results[i][0].transcript;
-      else                       interim += e.results[i][0].transcript;
+    if (ariaHasSpeechSynthesis()) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        loadAriaVoices();
+      };
     }
-    if (interim) { setAriaMsg('idle', '🎙 "' + interim + '…"'); setAriaMsg('nav', '🎙 "' + interim + '…"'); }
-    if (final)   { handleVoiceCommand(final.trim()); stopMic(); }
-  };
-  recognition.onerror = (e) => { stopMic(); if (e.error !== 'no-speech') showToast('Micro : ' + e.error); };
-  recognition.onend   = () => stopMic();
+
+    if (ariaHasRecognition()) {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      ariaRecognition = new SR();
+      ariaRecognition.lang = 'fr-FR';
+      ariaRecognition.continuous = false;
+      ariaRecognition.interimResults = false;
+      ariaRecognition.maxAlternatives = 1;
+
+      ariaRecognition.onstart = () => {
+        ariaListening = true;
+        updateMicUI(true);
+        setAriaMsg(getCurrentAriaState(), 'Je vous écoute…');
+      };
+
+      ariaRecognition.onend = () => {
+        ariaListening = false;
+        updateMicUI(false);
+      };
+
+      ariaRecognition.onerror = (event) => {
+        ariaListening = false;
+        updateMicUI(false);
+        ariaWarn('recognition error:', event?.error || event);
+      };
+
+      ariaRecognition.onresult = (event) => {
+        const transcript = event?.results?.[0]?.[0]?.transcript?.trim();
+        if (!transcript) return;
+        handleVoiceCommand(transcript);
+      };
+    } else {
+      ariaWarn('SpeechRecognition non disponible sur cet appareil');
+    }
+
+    setAriaMsg('idle', 'Bonjour ! Prêt pour la route ? Dites-moi où vous allez ou tapez votre destination. 😊');
+    setAriaMsg('nav', 'Navigation en cours. Je surveille la route pour vous ! 🚗');
+  } catch (err) {
+    ariaWarn('initARIA error:', err);
+  }
+}
+
+function updateMicUI(isActive) {
+  const micBtn = document.getElementById('mic-btn');
+  if (!micBtn) return;
+
+  micBtn.classList.toggle('active', !!isActive);
+  micBtn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
 }
 
 function toggleMic() {
-  if (!recognition)  { showToast('Micro non supporté sur ce navigateur'); return; }
-  if (isARIASpeaking){ synthesis.cancel(); isARIASpeaking = false; }
-  micActive ? stopMic() : startMic();
-}
-
-function startMic() {
-  micActive = true;
-  document.querySelectorAll('.mic-btn').forEach(b => b.classList.add('active'));
-  setAriaMsg('idle', '🎙 Je vous écoute…');
-  setAriaMsg('nav',  '🎙 Je vous écoute…');
-  try { recognition.start(); } catch {}
-}
-
-function stopMic() {
-  micActive = false;
-  document.querySelectorAll('.mic-btn').forEach(b => b.classList.remove('active'));
-  try { recognition.stop(); } catch {}
-}
-
-// ── CERVEAU CLAUDE ────────────────────────────
-
-async function handleVoiceCommand(userText) {
-  updateRouteContext();
-  conversationHistory.push({ role: 'user', content: userText });
-  setAriaMsg('idle', '✦ ARIA réfléchit…');
-  setAriaMsg('nav',  '✦ ARIA réfléchit…');
+  if (!ariaRecognition) {
+    showToast?.('Commande vocale non disponible sur cet appareil');
+    return;
+  }
 
   try {
-    const raw    = await callClaudeAPI();
-    const parsed = parseARIAResponse(raw);
-    setAriaMsg('idle', parsed.display_msg || parsed.message);
-    setAriaMsg('nav',  parsed.display_msg || parsed.message);
-    await speakARIA(parsed.message);
-    conversationHistory.push({ role: 'assistant', content: parsed.message });
-    executeARIAAction(parsed.action, parsed.action_data);
-    if (conversationHistory.length > 22)
-      conversationHistory = [conversationHistory[0], conversationHistory[1], ...conversationHistory.slice(-18)];
+    if (ariaListening) {
+      ariaRecognition.stop();
+    } else {
+      ariaRecognition.start();
+    }
   } catch (err) {
-    console.error('ARIA erreur:', err);
-    const fb = getFallbackResponse(userText);
-    setAriaMsg('idle', fb);
-    setAriaMsg('nav',  fb);
-    await speakARIA(fb);
+    ariaWarn('toggleMic error:', err);
   }
 }
 
-async function callClaudeAPI() {
-  // Priorité 1 : n8n (production sécurisée)
-  const n8nUrl = ARIA_CONFIG.N8N_WEBHOOK_URL || '';
-  if (n8nUrl && n8nUrl.length > 10 && !n8nUrl.includes('VOTRE')) {
-    return await callViaN8N();
-  }
-  // Priorité 2 : appel direct (test local)
-  return await callDirectClaude();
-}
+// ──────────────────────────────────────
+// COMMANDES VOCALES
+// ──────────────────────────────────────
 
-async function callDirectClaude() {
-  // Supporte ANTHROPIC_API_KEY et ANTHROPIC_KEY
-  const key = ARIA_CONFIG.ANTHROPIC_API_KEY || ARIA_CONFIG.ANTHROPIC_KEY || '';
-  if (!key || key.length < 10) throw new Error('Clé Anthropic manquante dans config.js');
+async function executeARIAAction(action) {
+  if (!action || typeof action !== 'object') return false;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-calls': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      system: buildSystemPromptWithContext(),
-      messages: conversationHistory.slice(2),
-    }),
-  });
-  if (!res.ok) {
-    const e = await res.json();
-    throw new Error(e.error?.message || 'Claude API error ' + res.status);
-  }
-  const data = await res.json();
-  return data.content[0].text;
-}
+  const type = action.type;
 
-async function callViaN8N() {
-  const res = await fetch(ARIA_CONFIG.N8N_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages: conversationHistory, context: routeContext }),
-  });
-  if (!res.ok) throw new Error('N8N error ' + res.status);
-  const data = await res.json();
-  return data.response || data.message || JSON.stringify(data);
-}
-
-function parseARIAResponse(raw) {
   try {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) return JSON.parse(m[0]);
-  } catch {}
-  return { message: raw.substring(0, 200), action: 'none', action_data: null, display_msg: raw };
-}
+    switch (type) {
+      case 'search': {
+        const query = action.query?.trim();
+        if (!query) return false;
 
-function executeARIAAction(action, data) {
-  if (action === 'navigate' && data) {
-    const input = document.getElementById('search-input');
-    if (input) input.value = data;
-    searchPlaces(data).then(() => {
-      setTimeout(() => {
-        if (window._searchResults?.length > 0) selectDestination(0);
-      }, 800);
-    }).catch(() => {
-      setTimeout(() => {
-        if (window._searchResults?.length > 0) selectDestination(0);
-      }, 1200);
-    });
-  } else if (action === 'stop_nav' && typeof navActive !== 'undefined' && navActive) {
-    stopNavigation();
-  } else if (action === 'report') {
-    openReportModal();
-  } else if (action === 'find_station' && typeof userLocation !== 'undefined' && userLocation) {
-    loadStationsNearUser(userLocation.lat, userLocation.lng, 10);
-    showToast('Stations affichées sur la carte');
+        setAriaMsg(getCurrentAriaState(), `Je cherche ${query}…`);
+        speakARIA(`Je cherche ${query}.`);
+
+        if (typeof window.searchPlaces === 'function') {
+          await window.searchPlaces(query);
+          return true;
+        }
+
+        showToast?.('Recherche indisponible');
+        return false;
+      }
+
+      case 'quick-destination': {
+        const value = action.value?.trim();
+        if (!value) return false;
+
+        setAriaMsg(getCurrentAriaState(), `Recherche rapide : ${value}`);
+        speakARIA(`D'accord, ${value}.`);
+
+        if (typeof window.quickDest === 'function') {
+          window.quickDest(value);
+          return true;
+        }
+
+        if (typeof window.searchPlaces === 'function') {
+          await window.searchPlaces(value);
+          return true;
+        }
+
+        return false;
+      }
+
+      case 'start-navigation': {
+        if (typeof window.startNavigation === 'function') {
+          window.startNavigation();
+          setAriaMsg('nav', 'Navigation démarrée.');
+          speakARIA('Navigation démarrée.');
+          return true;
+        }
+
+        showToast?.('Démarrage navigation indisponible');
+        return false;
+      }
+
+      case 'stop-navigation': {
+        if (typeof window.stopNavigation === 'function') {
+          window.stopNavigation();
+          setAriaMsg('idle', 'Navigation arrêtée.');
+          speakARIA('Navigation arrêtée.');
+          return true;
+        }
+
+        showToast?.('Arrêt navigation indisponible');
+        return false;
+      }
+
+      case 'cancel-route': {
+        if (typeof window.cancelRoute === 'function') {
+          window.cancelRoute();
+          setAriaMsg('idle', 'Itinéraire annulé.');
+          speakARIA('Itinéraire annulé.');
+          return true;
+        }
+
+        showToast?.('Annulation indisponible');
+        return false;
+      }
+
+      case 'toggle-stations': {
+        if (typeof window.toggleStations === 'function') {
+          window.toggleStations();
+          speakARIA('Affichage des stations modifié.');
+          return true;
+        }
+        return false;
+      }
+
+      case 'recenter': {
+        if (typeof window.recenterMap === 'function') {
+          window.recenterMap();
+          speakARIA('Je recentre la carte.');
+          return true;
+        }
+        return false;
+      }
+
+      case 'report': {
+        if (action.reportType && typeof window.sendReport === 'function') {
+          window.sendReport(action.reportType);
+          speakARIA('Signalement envoyé.');
+          return true;
+        }
+
+        if (typeof window.openReportModal === 'function') {
+          window.openReportModal();
+          speakARIA('J’ouvre les signalements.');
+          return true;
+        }
+
+        return false;
+      }
+
+      default:
+        return false;
+    }
+  } catch (err) {
+    ariaWarn('executeARIAAction error:', err);
+    return false;
   }
 }
 
-function getFallbackResponse(txt) {
-  const l = txt.toLowerCase();
-  if (l.includes('aller') || l.includes('navigue') || l.includes('destination'))
-    return 'Je recherche votre destination !';
-  if (l.includes('météo') || l.includes('meteo') || l.includes('temps'))
-    return (document.getElementById('weather-temp')?.textContent || '') + ' ' + (document.getElementById('weather-desc')?.textContent || '');
-  if (l.includes('arrivée') || l.includes('arrivee') || l.includes('eta'))
-    return 'Arrivée prévue à ' + (document.getElementById('eta-time')?.textContent || '—');
-  if (l.includes('station') || l.includes('essence'))
-    return 'Je cherche les stations proches.';
-  return 'Désolée, je n\'ai pas compris. Dites par exemple : aller à Lyon, ou quelle météo.';
-}
+async function handleVoiceCommand(transcript) {
+  const raw = String(transcript || '').trim();
+  const text = normalizeVoiceText(raw);
 
-// ── CONTEXTE ROUTE ────────────────────────────
+  ariaLog('Commande vocale:', raw);
 
-function updateRouteContext() {
-  routeContext.destination  = document.getElementById('nav-dest-name')?.textContent || null;
-  routeContext.eta          = document.getElementById('eta-time')?.textContent || null;
-  routeContext.distanceLeft = document.getElementById('nav-remaining-dist')?.textContent || null;
-  routeContext.currentSpeed = document.getElementById('speed-num')?.textContent || null;
-  const t = document.getElementById('weather-temp')?.textContent;
-  const d = document.getElementById('weather-desc')?.textContent;
-  routeContext.weather  = t ? t + ' ' + d : null;
-  routeContext.fuelCost = document.getElementById('nav-fuel-cost')?.textContent || null;
-  routeContext.alerts   = Array.from(document.querySelectorAll('#alerts-strip .alert-text'))
-    .map(e => e.textContent).slice(0, 3);
-}
+  if (!text) return;
 
-// ── MESSAGES PROACTIFS ────────────────────────
+  setAriaMsg(getCurrentAriaState(), `J'ai entendu : "${raw}"`);
 
-function ariaOnNavStart(destination, eta) {
-  const msg = 'Navigation démarrée vers ' + destination + '. Arrivée prévue à ' + eta + '. Bonne route !';
-  setAriaMsg('nav', '🚗 ' + msg);
-  setTimeout(() => speakARIA(msg), 600);
-  conversationHistory.push({ role: 'assistant', content: msg });
-}
+  // arrêt navigation
+  if (
+    includesAny(text, [
+      'arrete la navigation',
+      'stop navigation',
+      'arreter la navigation',
+      'annule la navigation',
+      'quitte la navigation',
+    ])
+  ) {
+    await executeARIAAction({ type: 'stop-navigation' });
+    return;
+  }
 
-function ariaWellbeingCheck() {
-  const msgs = [
-    'Vous conduisez depuis 2 heures. Comment vous sentez-vous ? Une pause s\'impose peut-être ?',
-    'Cela fait 2 heures que vous conduisez. Je vous recommande une pause pour rester alerte !',
-    'Petit rappel bienveillant : une pause toutes les 2 heures est recommandée. Vous allez bien ?',
+  // démarrer navigation
+  if (
+    includesAny(text, [
+      'demarre la navigation',
+      'lance la navigation',
+      'commence la navigation',
+      'demarrer la navigation',
+    ])
+  ) {
+    await executeARIAAction({ type: 'start-navigation' });
+    return;
+  }
+
+  // annuler itinéraire
+  if (
+    includesAny(text, [
+      'annule litineraire',
+      'annule l itineraire',
+      'supprime litineraire',
+      'supprime l itineraire',
+      'annule le trajet',
+    ])
+  ) {
+    await executeARIAAction({ type: 'cancel-route' });
+    return;
+  }
+
+  // stations
+  if (
+    includesAny(text, [
+      'masque les stations',
+      'affiche les stations',
+      'cache les stations',
+      'montre les stations',
+    ])
+  ) {
+    await executeARIAAction({ type: 'toggle-stations' });
+    return;
+  }
+
+  // recadrage carte
+  if (
+    includesAny(text, [
+      'recentre la carte',
+      'recentre la carte',
+      'centre la carte',
+      'recentre',
+      'recentre',
+    ])
+  ) {
+    await executeARIAAction({ type: 'recenter' });
+    return;
+  }
+
+  // destinations rapides
+  if (includesAny(text, ['maison'])) {
+    await executeARIAAction({ type: 'quick-destination', value: 'Maison' });
+    return;
+  }
+
+  if (includesAny(text, ['travail', 'bureau'])) {
+    await executeARIAAction({ type: 'quick-destination', value: 'Travail' });
+    return;
+  }
+
+  if (
+    includesAny(text, [
+      'station essence',
+      'essence',
+      'pompe a essence',
+      'pompe essence',
+      'station service',
+    ])
+  ) {
+    await executeARIAAction({ type: 'quick-destination', value: 'Station essence proche' });
+    return;
+  }
+
+  if (
+    includesAny(text, [
+      'restaurant',
+      'manger',
+      'je veux manger',
+      'resto',
+    ])
+  ) {
+    await executeARIAAction({ type: 'quick-destination', value: 'Restaurant proche' });
+    return;
+  }
+
+  // signalements
+  if (includesAny(text, ['signale un accident', 'accident'])) {
+    await executeARIAAction({ type: 'report', reportType: 'accident' });
+    return;
+  }
+
+  if (includesAny(text, ['signale un bouchon', 'bouchon'])) {
+    await executeARIAAction({ type: 'report', reportType: 'bouchon' });
+    return;
+  }
+
+  if (includesAny(text, ['signale un radar', 'radar'])) {
+    await executeARIAAction({ type: 'report', reportType: 'radar' });
+    return;
+  }
+
+  if (includesAny(text, ['signale police', 'controle de police', 'police'])) {
+    await executeARIAAction({ type: 'report', reportType: 'police' });
+    return;
+  }
+
+  // "va à ..."
+  const goToPatterns = [
+    /^va a (.+)$/i,
+    /^aller a (.+)$/i,
+    /^navigue vers (.+)$/i,
+    /^emmene moi a (.+)$/i,
+    /^conduis moi a (.+)$/i,
+    /^destination (.+)$/i,
+    /^cherche (.+)$/i,
   ];
-  const msg = msgs[Math.floor(Math.random() * msgs.length)];
-  setAriaMsg('nav', '💙 ' + msg);
+
+  for (const pattern of goToPatterns) {
+    const match = raw.match(pattern);
+    if (match && match[1]) {
+      await executeARIAAction({
+        type: 'search',
+        query: match[1].trim(),
+      });
+      return;
+    }
+  }
+
+  // fallback = recherche brute
+  if (typeof window.searchPlaces === 'function') {
+    speakARIA(`Je cherche ${raw}.`);
+    await window.searchPlaces(raw);
+    return;
+  }
+
+  speakARIA('Je n’ai pas compris la commande.');
+}
+
+// ──────────────────────────────────────
+// ÉVÉNEMENTS NARRATION
+// ──────────────────────────────────────
+
+function ariaOnNavStart(destName, arrivalTime) {
+  const msg = `Navigation démarrée vers ${destName}. Arrivée prévue à ${arrivalTime}.`;
+  setAriaMsg('nav', msg);
   speakARIA(msg);
-  conversationHistory.push({ role: 'assistant', content: msg });
+}
+
+function ariaAlertStation(brand, distStr, dieselPrice, sp95Price) {
+  let msg = `${brand} à ${distStr}.`;
+  if (dieselPrice) msg += ` Diesel à ${dieselPrice} euro.`;
+  if (sp95Price) msg += ` SP95 à ${sp95Price} euro.`;
+
+  setAriaMsg('nav', msg);
+  speakARIA(msg, { rate: 1.02 });
 }
 
 function ariaAlertIncident(text) {
-  setAriaMsg('nav', '⚠ ' + text);
-  speakARIA(text);
-  conversationHistory.push({ role: 'assistant', content: text });
-}
-
-function ariaAlertStation(brandName, distStr, diesel, sp95) {
-  const msg = 'Station ' + brandName + ' dans ' + distStr
-    + (diesel ? '. Diesel à ' + diesel + ' euros.' : '')
-    + (sp95   ? ' Sans plomb à ' + sp95 + ' euros.' : '');
-  const display = '⛽ ' + brandName + ' dans ' + distStr
-    + (diesel ? ' · Diesel €' + diesel : '')
-    + (sp95   ? ' · SP95 €' + sp95 : '');
-  setAriaMsg('nav', display);
+  const msg = text || 'Incident signalé sur votre trajet.';
+  setAriaMsg('nav', msg);
   speakARIA(msg);
 }
 
-// ── UTILITAIRES ───────────────────────────────
-
-function setAriaMsg(state, msg) {
-  const el = document.getElementById(state === 'nav' ? 'aria-nav-msg' : 'aria-idle-msg');
-  if (el) el.textContent = msg;
+function ariaWellbeingCheck() {
+  const msg = 'Pensez à faire une pause si vous êtes fatigué.';
+  setAriaMsg('nav', msg);
+  speakARIA(msg);
 }
+
+// ──────────────────────────────────────
+// GLOBALS
+// ──────────────────────────────────────
+
+window.initARIA = initARIA;
+window.toggleMic = toggleMic;
+window.speakARIA = speakARIA;
+window.setAriaMsg = setAriaMsg;
+window.handleVoiceCommand = handleVoiceCommand;
+window.executeARIAAction = executeARIAAction;
+window.ariaOnNavStart = ariaOnNavStart;
+window.ariaAlertStation = ariaAlertStation;
+window.ariaAlertIncident = ariaAlertIncident;
+window.ariaWellbeingCheck = ariaWellbeingCheck;

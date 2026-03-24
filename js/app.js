@@ -21,8 +21,8 @@ async function loadEnv() {
     if (env.ELEVENLABS_KEY)     ARIA_CONFIG.ELEVENLABS_KEY     = env.ELEVENLABS_KEY;
 
     console.log('✅ Variables chargées depuis Vercel');
-  } catch {
-    console.warn('⚠ /api/env non disponible — utilisation config locale');
+  } catch (err) {
+    console.warn('⚠ /api/env non disponible — utilisation config locale', err);
   }
 }
 
@@ -46,7 +46,9 @@ async function startApp() {
     return;
   }
 
-  initARIA();
+  if (typeof initARIA === 'function') {
+    initARIA();
+  }
 
   setTimeout(() => {
     document.getElementById('splash')?.classList.add('hidden');
@@ -59,9 +61,22 @@ async function startApp() {
     }, 300);
   }, 2000);
 
-  if (typeof initSupabase === 'function') initSupabase();
+  if (typeof initSupabase === 'function') {
+    initSupabase();
+  }
 
   startGeolocationTracking();
+}
+
+// ──────────────────────────────────────
+// GÉOLOCALISATION
+// ──────────────────────────────────────
+
+function ensureUserLocationObject() {
+  if (!window.userLocation || typeof window.userLocation !== 'object') {
+    window.userLocation = {};
+  }
+  return window.userLocation;
 }
 
 function startGeolocationTracking() {
@@ -102,33 +117,48 @@ function startGeolocationTracking() {
 }
 
 function handleLocationUpdate(pos, isInitial = false) {
-  const lat = pos.coords.latitude;
-  const lng = pos.coords.longitude;
-  const heading = Number.isFinite(pos.coords.heading) ? pos.coords.heading : null;
-  const speed = Number.isFinite(pos.coords.speed) ? pos.coords.speed : 0;
-  const accuracy = Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : null;
+  const lat = pos?.coords?.latitude;
+  const lng = pos?.coords?.longitude;
+  const heading = Number.isFinite(pos?.coords?.heading) ? pos.coords.heading : null;
+  const speed = Number.isFinite(pos?.coords?.speed) ? pos.coords.speed : 0;
+  const accuracy = Number.isFinite(pos?.coords?.accuracy) ? pos.coords.accuracy : null;
 
-  if (!window.userLocation) {
-    window.userLocation = {};
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    console.warn('⚠ Coordonnées GPS invalides');
+    return;
   }
 
-  userLocation.lat = lat;
-  userLocation.lng = lng;
-  userLocation.heading = heading;
-  userLocation.speed = speed;
-  userLocation.accuracy = accuracy;
-  userLocation.timestamp = Date.now();
+  const loc = ensureUserLocationObject();
+  loc.lat = lat;
+  loc.lng = lng;
+  loc.heading = heading;
+  loc.speed = speed;
+  loc.accuracy = accuracy;
+  loc.timestamp = Date.now();
 
   if (typeof updateUserMarker === 'function') {
-    updateUserMarker(lat, lng, heading);
+    try {
+      updateUserMarker(lat, lng, heading);
+    } catch (err) {
+      console.warn('updateUserMarker error:', err);
+    }
   }
 
   if (typeof updateNavigationProgress === 'function') {
-    updateNavigationProgress(lat, lng, heading);
+    try {
+      updateNavigationProgress(lat, lng, heading);
+    } catch (err) {
+      console.warn('updateNavigationProgress error:', err);
+    }
   }
 
   if (typeof updateSpeedUI === 'function') {
-    updateSpeedUI(speed);
+    try {
+      updateSpeedUI(speed);
+    } catch (err) {
+      console.warn('updateSpeedUI error:', err);
+      updateDefaultSpeedUI(speed);
+    }
   } else {
     updateDefaultSpeedUI(speed);
   }
@@ -138,22 +168,37 @@ function handleLocationUpdate(pos, isInitial = false) {
 
     if (weatherInterval) clearInterval(weatherInterval);
     weatherInterval = setInterval(() => {
-      fetchWeatherSafe(userLocation.lat, userLocation.lng);
+      const current = ensureUserLocationObject();
+      if (Number.isFinite(current.lat) && Number.isFinite(current.lng)) {
+        fetchWeatherSafe(current.lat, current.lng);
+      }
     }, 600000);
 
     if (!stationsInitialLoadDone && typeof loadStationsNearUser === 'function') {
       stationsInitialLoadDone = true;
-      setTimeout(() => loadStationsNearUser(lat, lng, 15), 1500);
+      setTimeout(() => {
+        const current = ensureUserLocationObject();
+        loadStationsNearUser(current.lat, current.lng, 15);
+      }, 1500);
     }
   }
 
-  if (navActive && window.isFollowing && map && typeof map.easeTo === 'function') {
+  // Suivi de carte en navigation
+  if (
+    window.navActive &&
+    window.isFollowing &&
+    window.map &&
+    typeof map.easeTo === 'function'
+  ) {
     try {
       map.easeTo({
         center: [lng, lat],
-        bearing: heading ?? map.getBearing?.() ?? 0,
-        duration: 500,
+        zoom: Math.max(typeof map.getZoom === 'function' ? map.getZoom() : 16, 16),
+        pitch: 58,
+        bearing: heading ?? (typeof map.getBearing === 'function' ? map.getBearing() : 0),
+        duration: 350,
         essential: true,
+        padding: { top: 130, bottom: 220, left: 20, right: 20 },
       });
     } catch (err) {
       console.warn('map follow error:', err);
@@ -161,42 +206,16 @@ function handleLocationUpdate(pos, isInitial = false) {
   }
 }
 
-function fetchWeatherSafe(lat, lng) {
-  if (typeof fetchWeather !== 'function') return;
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-
-  try {
-    fetchWeather(lat, lng);
-  } catch (err) {
-    console.warn('weather error:', err);
-  }
-}
-
-function updateDefaultSpeedUI(speedMps) {
-  const kmh = Math.max(0, Math.round((speedMps || 0) * 3.6));
-  const speedEl =
-    document.getElementById('speed-value') ||
-    document.getElementById('speed') ||
-    document.getElementById('speed-kmh');
-
-  if (speedEl) {
-    speedEl.textContent = `${kmh}`;
-  }
-}
-
 function useDefaultLocationFallback() {
   const [lng, lat] = ARIA_CONFIG.DEFAULT_CENTER;
 
-  if (!window.userLocation) {
-    window.userLocation = {};
-  }
-
-  userLocation.lat = lat;
-  userLocation.lng = lng;
-  userLocation.heading = 0;
-  userLocation.speed = 0;
-  userLocation.accuracy = null;
-  userLocation.timestamp = Date.now();
+  const loc = ensureUserLocationObject();
+  loc.lat = lat;
+  loc.lng = lng;
+  loc.heading = 0;
+  loc.speed = 0;
+  loc.accuracy = null;
+  loc.timestamp = Date.now();
 
   fetchWeatherSafe(lat, lng);
 
@@ -222,11 +241,37 @@ function stopGeolocationTracking() {
   }
 }
 
+// ──────────────────────────────────────
+// MÉTÉO / VITESSE / UI
+// ──────────────────────────────────────
+
+function fetchWeatherSafe(lat, lng) {
+  if (typeof fetchWeather !== 'function') return;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+  try {
+    fetchWeather(lat, lng);
+  } catch (err) {
+    console.warn('weather error:', err);
+  }
+}
+
+function updateDefaultSpeedUI(speedMps) {
+  const kmh = Math.max(0, Math.round((speedMps || 0) * 3.6));
+
+  const speedNum = document.getElementById('speed-num');
+  if (speedNum) speedNum.textContent = kmh;
+
+  const speedPill = document.getElementById('speed-pill');
+  if (speedPill) speedPill.textContent = `${kmh} km/h`;
+}
+
 function showDemoMode() {
   const splash = document.getElementById('splash');
   if (splash) splash.classList.add('hidden');
 
   if (typeof initSearch === 'function') initSearch();
+
   if (typeof addAlert === 'function') {
     addAlert(
       'info',
@@ -235,6 +280,7 @@ function showDemoMode() {
       'badge-blue'
     );
   }
+
   setState('idle');
 }
 
@@ -255,6 +301,10 @@ function setState(state) {
   });
 }
 
+// ──────────────────────────────────────
+// EVENTS GLOBAUX
+// ──────────────────────────────────────
+
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#top-hud') && !e.target.closest('#search-results')) {
     if (typeof hideSearchResults === 'function') hideSearchResults();
@@ -268,3 +318,8 @@ document.addEventListener('click', (e) => {
 window.addEventListener('beforeunload', () => {
   stopGeolocationTracking();
 });
+
+// Exposition minimale
+window.setState = setState;
+window.updateClock = updateClock;
+window.startApp = startApp;

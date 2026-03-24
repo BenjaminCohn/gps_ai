@@ -1,6 +1,8 @@
 // ═══════════════════════════════════════
 //  ARIA GPS — Contrôleur Principal
 // ═══════════════════════════════════════
+window.navActive = false;
+window.isFollowing = false;
 
 let gpsWatchId = null;
 let weatherInterval = null;
