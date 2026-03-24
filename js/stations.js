@@ -1,13 +1,24 @@
 // ═══════════════════════════════════════
-//  ARIA GPS — Stations Essence
+//  ARIA GPS — Stations Essence (CLEAN)
+//  - OSM (Overpass) + Prix Carburants via /api/fuel (proxy Vercel)
+//  - Filtre route / proche utilisateur
+//  - Markers + Drawer + Alertes stations
 // ═══════════════════════════════════════
 
+/* global mapboxgl */
+
+// ──────────────────────────────────────
+// SHARED NAV (utilisé par la navigation)
+// ──────────────────────────────────────
 const ARIA_NAV_SHARED = window.ARIA_NAV_SHARED || (window.ARIA_NAV_SHARED = {
   currentRouteGeoJSON: null,
   currentRouteSteps: [],
   currentStepIndex: 0,
 });
 
+// ──────────────────────────────────────
+// STATE
+// ──────────────────────────────────────
 let stationMarkers = [];
 let stationsData = [];
 let upcomingAlertShown = new Set();
@@ -18,13 +29,14 @@ let stationsVisible = true;
 
 window.stationsData = stationsData;
 
-const GOV_EXPORT_URL =
-  'https://data.economie.gouv.fr/explore/dataset/prix-des-carburants-en-france-flux-instantane-v2/exports/json?lang=fr&timezone=Europe%2FParis';
+// ──────────────────────────────────────
+// CONFIG
+// ──────────────────────────────────────
+// ✅ IMPORTANT : on passe par TON proxy Vercel (évite CORS + exports 504)
+const GOV_PROXY_URL = '/api/fuel';
 
-let govFuelCache = {
-  ts: 0,
-  data: [],
-};
+// Cache prix gouv (par zone)
+let govFuelCache = { ts: 0, key: '', data: [] };
 
 const BRANDS = {
   total:         { color: '#E63B2E', bg: '#FFF0EF', abbr: 'TT', full: 'TotalEnergies' },
@@ -59,7 +71,6 @@ const FUEL_ORDER = ['Gazole', 'SP95', 'E10', 'SP98', 'E85', 'GPLc', 'HVO100'];
 // ──────────────────────────────────────
 // HELPERS
 // ──────────────────────────────────────
-
 function normalizeNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -73,11 +84,7 @@ function uniq(arr = []) {
 
 function escapeHtml(str = '') {
   return String(str).replace(/[&<>"']/g, (m) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[m]));
 }
 
@@ -127,15 +134,12 @@ function distancePointToSegmentKm(px, py, x1, y1, x2, y2) {
   let param = -1;
   if (lenSq !== 0) param = dot / lenSq;
 
-  let xx;
-  let yy;
+  let xx, yy;
 
   if (param < 0) {
-    xx = x1;
-    yy = y1;
+    xx = x1; yy = y1;
   } else if (param > 1) {
-    xx = x2;
-    yy = y2;
+    xx = x2; yy = y2;
   } else {
     xx = x1 + param * C;
     yy = y1 + param * D;
@@ -145,9 +149,7 @@ function distancePointToSegmentKm(px, py, x1, y1, x2, y2) {
 }
 
 function isStationNearRoute(station, routeCoords, thresholdKm = 2.5) {
-  if (!station?.lat || !station?.lng || !Array.isArray(routeCoords) || routeCoords.length < 2) {
-    return false;
-  }
+  if (!station?.lat || !station?.lng || !Array.isArray(routeCoords) || routeCoords.length < 2) return false;
 
   for (let i = 0; i < routeCoords.length - 1; i++) {
     const [x1, y1] = routeCoords[i];
@@ -155,7 +157,6 @@ function isStationNearRoute(station, routeCoords, thresholdKm = 2.5) {
     const d = distancePointToSegmentKm(station.lng, station.lat, x1, y1, x2, y2);
     if (d <= thresholdKm) return true;
   }
-
   return false;
 }
 
@@ -167,15 +168,16 @@ function getBrand(name) {
     if (k !== 'default' && key.includes(k)) return v;
   }
 
-  return {
-    ...BRANDS.default,
-    abbr: name.slice(0, 2).toUpperCase(),
-    full: name,
-  };
+  return { ...BRANDS.default, abbr: name.slice(0, 2).toUpperCase(), full: name };
 }
 
 function getStationId(station) {
   return station?.govId || station?.id || `${station?.lat}-${station?.lng}-${station?.name || ''}`;
+}
+
+function setStationsData(list) {
+  stationsData = Array.isArray(list) ? list : [];
+  window.stationsData = stationsData;
 }
 
 function getStationsForCurrentContext(stations) {
@@ -188,8 +190,8 @@ function getStationsForCurrentContext(stations) {
 
   if (window.userLocation?.lat && window.userLocation?.lng) {
     list.sort((a, b) => {
-      const da = haversineKm(userLocation.lat, userLocation.lng, a.lat, a.lng);
-      const db = haversineKm(userLocation.lat, userLocation.lng, b.lat, b.lng);
+      const da = haversineKm(window.userLocation.lat, window.userLocation.lng, a.lat, a.lng);
+      const db = haversineKm(window.userLocation.lat, window.userLocation.lng, b.lat, b.lng);
       return da - db;
     });
   }
@@ -213,9 +215,8 @@ function refreshStationSelection() {
 }
 
 // ──────────────────────────────────────
-// OSM
+// OSM (Overpass) — stations “physiques”
 // ──────────────────────────────────────
-
 function parseOSMServices(tags) {
   const s = [];
   if (tags.toilets === 'yes' || tags['amenity:toilets'] === 'yes') s.push('Toilettes');
@@ -242,26 +243,14 @@ async function fetchStationsFromOSM(minLat, maxLat, minLng, maxLng) {
       body: 'data=' + encodeURIComponent(query),
     });
 
-    if (!res.ok) {
-      console.warn('OSM HTTP error:', res.status);
-      return [];
-    }
+    if (!res.ok) return [];
 
     const contentType = res.headers.get('content-type') || '';
     const text = await res.text();
-
-    if (!contentType.includes('application/json')) {
-      console.warn('OSM non-JSON response ignored');
-      return [];
-    }
+    if (!contentType.includes('application/json')) return [];
 
     let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      console.warn('OSM JSON parse failed');
-      return [];
-    }
+    try { data = JSON.parse(text); } catch { return []; }
 
     return (data.elements || [])
       .map(el => ({
@@ -270,93 +259,74 @@ async function fetchStationsFromOSM(minLat, maxLat, minLng, maxLng) {
         lng: el.lon || el.center?.lon,
         name: el.tags?.brand || el.tags?.name || el.tags?.operator || 'Station',
         brand: el.tags?.brand || el.tags?.name || '',
-        address: [
-          el.tags?.['addr:housenumber'],
-          el.tags?.['addr:street'],
-          el.tags?.['addr:city'],
-        ].filter(Boolean).join(' '),
+        address: [el.tags?.['addr:housenumber'], el.tags?.['addr:street'], el.tags?.['addr:city']]
+          .filter(Boolean).join(' '),
         services: parseOSMServices(el.tags || {}),
         openingHours: el.tags?.opening_hours || '',
         prices: {},
         govId: null,
       }))
       .filter(s => s.lat && s.lng);
-  } catch (err) {
-    console.warn('OSM error:', err);
+  } catch {
     return [];
   }
 }
 
 // ──────────────────────────────────────
-// API CARBURANTS
+// GOUV — via /api/fuel (proxy)
 // ──────────────────────────────────────
-
-async function fetchGovFuelStationsCached() {
-  const fresh = govFuelCache.data.length && (Date.now() - govFuelCache.ts) < 10 * 60 * 1000;
-  if (fresh) return govFuelCache.data;
-
-  const res = await fetch(GOV_EXPORT_URL, {
-    headers: { Accept: 'application/json' },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Fuel export HTTP ${res.status}`);
-  }
-
-  const data = await res.json();
-  govFuelCache = {
-    ts: Date.now(),
-    data: Array.isArray(data) ? data : [],
-  };
-
-  return govFuelCache.data;
+function normalizeGovPayload(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return [];
 }
 
 function pickGovCoords(row) {
-  const lat =
+  // Supporte plusieurs formats Opendatasoft
+  // geo_point_2d: [lat, lon] ou {lat, lon}
+  // geom: {coordinates:[lng,lat]}
+  let lat =
     normalizeNumber(row.latitude) ??
+    normalizeNumber(row.lat) ??
     normalizeNumber(row.geom?.lat) ??
-    normalizeNumber(row.geom?.coordinates?.[1]) ??
     normalizeNumber(row.geo_point_2d?.lat);
 
-  const lng =
+  let lng =
     normalizeNumber(row.longitude) ??
+    normalizeNumber(row.lng) ??
     normalizeNumber(row.geom?.lon) ??
     normalizeNumber(row.geom?.lng) ??
-    normalizeNumber(row.geom?.coordinates?.[0]) ??
-    normalizeNumber(row.geo_point_2d?.lon);
+    normalizeNumber(row.geo_point_2d?.lon) ??
+    normalizeNumber(row.geo_point_2d?.lng);
+
+  if ((!Number.isFinite(lat) || !Number.isFinite(lng)) && Array.isArray(row.geo_point_2d) && row.geo_point_2d.length === 2) {
+    lat = normalizeNumber(row.geo_point_2d[0]);
+    lng = normalizeNumber(row.geo_point_2d[1]);
+  }
+
+  if ((!Number.isFinite(lat) || !Number.isFinite(lng)) && Array.isArray(row.geom?.coordinates) && row.geom.coordinates.length >= 2) {
+    lng = normalizeNumber(row.geom.coordinates[0]);
+    lat = normalizeNumber(row.geom.coordinates[1]);
+  }
 
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   return { lat, lng };
 }
 
 function buildGovAddress(gov) {
-  return [
-    gov.adresse || gov.address || '',
-    gov.cp || gov.postal_code || '',
-    gov.ville || gov.city || '',
-  ].filter(Boolean).join(' ').trim();
+  return [gov.adresse || gov.address || '', gov.cp || gov.postal_code || '', gov.ville || gov.city || '']
+    .filter(Boolean).join(' ').trim();
 }
 
 function parseGovServices(gov) {
-  const raw =
-    gov.services ||
-    gov.service ||
-    gov.services_service ||
-    gov.service_service ||
-    gov.services_list ||
-    [];
-
+  const raw = gov.services || gov.service || gov.services_list || [];
   let items = [];
 
-  if (Array.isArray(raw)) {
-    items = raw;
-  } else if (typeof raw === 'string') {
-    items = raw.split(/[;,|]/).map(s => s.trim());
-  }
+  if (Array.isArray(raw)) items = raw;
+  else if (typeof raw === 'string') items = raw.split(/[;,|]/).map(s => s.trim());
 
   const out = [];
-
   items.forEach((item) => {
     const v = String(item).toLowerCase();
     if (v.includes('toilet')) out.push('Toilettes');
@@ -372,6 +342,7 @@ function parseGovServices(gov) {
 function parsePricesFromGov(station) {
   const prices = {};
 
+  // Certains dumps exposent des champs directs, d'autres un tableau "prix"
   const fieldMap = {
     Gazole: ['gazole_prix', 'Gazole', 'gazole'],
     SP95:   ['sp95_prix', 'SP95', 'sp95'],
@@ -389,6 +360,8 @@ function parsePricesFromGov(station) {
 
       let v = normalizeNumber(raw);
       if (v === null || v <= 0) continue;
+
+      // parfois en millièmes (ex: 1799 => 1.799)
       if (v > 10) v /= 1000;
 
       prices[fuelName] = v;
@@ -416,25 +389,53 @@ function parsePricesFromGov(station) {
   return prices;
 }
 
-async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
-  const all = await fetchGovFuelStationsCached();
+async function fetchGovFuelStationsCached(centerLat, centerLng, radiusMeters, limit = 80) {
+  const key = `${centerLat.toFixed(4)}|${centerLng.toFixed(4)}|${Math.round(radiusMeters)}|${limit}`;
+  const fresh = govFuelCache.data.length && govFuelCache.key === key && (Date.now() - govFuelCache.ts) < 5 * 60 * 1000;
+  if (fresh) return govFuelCache.data;
 
+  const url =
+    `${GOV_PROXY_URL}?lat=${encodeURIComponent(centerLat)}` +
+    `&lng=${encodeURIComponent(centerLng)}` +
+    `&radius=${encodeURIComponent(Math.round(radiusMeters))}` +
+    `&limit=${encodeURIComponent(limit)}`;
+
+  const payload = await fetchJsonWithTimeout(url, { headers: { Accept: 'application/json' } }, 12000);
+  const rows = normalizeGovPayload(payload);
+
+  govFuelCache = { ts: Date.now(), key, data: rows };
+  return rows;
+}
+
+async function fetchPricesGouvernement(minLat, maxLat, minLng, maxLng) {
+  // centre bbox
+  const cLat = (minLat + maxLat) / 2;
+  const cLng = (minLng + maxLng) / 2;
+
+  // rayon ≈ centre → coin le plus loin
+  const rKm = Math.max(
+    haversineKm(cLat, cLng, minLat, minLng),
+    haversineKm(cLat, cLng, minLat, maxLng),
+    haversineKm(cLat, cLng, maxLat, minLng),
+    haversineKm(cLat, cLng, maxLat, maxLng),
+  );
+
+  const radiusMeters = Math.max(2000, Math.round((rKm + 1.2) * 1000)); // marge
+  const all = await fetchGovFuelStationsCached(cLat, cLng, radiusMeters, 100);
+
+  // filtre strict bbox (comme avant)
   return all.filter((row) => {
     const c = pickGovCoords(row);
     if (!c) return false;
-
-    return (
-      c.lat >= minLat &&
-      c.lat <= maxLat &&
-      c.lng >= minLng &&
-      c.lng <= maxLng
-    );
+    return c.lat >= minLat && c.lat <= maxLat && c.lng >= minLng && c.lng <= maxLng;
   });
 }
 
+// ──────────────────────────────────────
+// MERGE OSM + GOV
+// ──────────────────────────────────────
 function mergeStationsAndPrices(osmStations, govData) {
-  const merged = [...osmStations];
-
+  const merged = [...(osmStations || [])];
   if (!Array.isArray(govData) || !govData.length) return merged;
 
   govData.forEach((gov) => {
@@ -443,18 +444,13 @@ function mergeStationsAndPrices(osmStations, govData) {
 
     const parsedPrices = parsePricesFromGov(gov);
     const govName =
-      gov.enseigne ||
-      gov.enseignes ||
-      gov.Enseignes ||
-      gov.brand ||
-      gov.nom ||
-      'Station';
-
+      gov.enseigne || gov.enseignes || gov.Enseignes || gov.brand || gov.nom || 'Station';
     const govAddress = buildGovAddress(gov) || gov.adresse || '';
     const govServices = parseGovServices(gov);
 
+    // Match avec station OSM proche
     let best = null;
-    let bestDist = 0.35;
+    let bestDist = 0.35; // 350m
 
     merged.forEach((s) => {
       if (!s.lat || !s.lng) return;
@@ -492,9 +488,8 @@ function mergeStationsAndPrices(osmStations, govData) {
 }
 
 // ──────────────────────────────────────
-// CHARGEMENT
+// CHARGEMENT — bbox / route / user
 // ──────────────────────────────────────
-
 async function loadStationsAlongRoute(routeCoords) {
   if (!Array.isArray(routeCoords) || !routeCoords.length) return;
 
@@ -527,10 +522,10 @@ async function loadStationsInBbox(minLat, maxLat, minLng, maxLng) {
     const govPrices = govRes.status === 'fulfilled' ? govRes.value : [];
 
     if (osmRes.status === 'rejected') console.warn('OSM error:', osmRes.reason);
-    if (govRes.status === 'rejected') console.warn('API carburants error:', govRes.reason);
+    if (govRes.status === 'rejected') console.warn('GOV fuel error:', govRes.reason);
 
-    stationsData = mergeStationsAndPrices(osmStations, govPrices);
-    window.stationsData = stationsData;
+    const merged = mergeStationsAndPrices(osmStations, govPrices);
+    setStationsData(merged);
 
     if (Date.now() < stationClickLockUntil) return;
     if (!stationsVisible) return;
@@ -559,20 +554,17 @@ async function loadStationsInBbox(minLat, maxLat, minLng, maxLng) {
 }
 
 // ──────────────────────────────────────
-// RENDU
+// RENDU — markers + drawer
 // ──────────────────────────────────────
-
 function clearStationMarkers(closeDrawer = true) {
   stationMarkers.forEach(({ marker }) => marker.remove());
   stationMarkers = [];
 
-  if (closeDrawer) {
-    closeStationPopup();
-  }
+  if (closeDrawer) closeStationPopup();
 }
 
 function renderStationMarkers(stations) {
-  if (!stationsVisible || !window.map) return;
+  if (!stationsVisible || !window.map || !window.mapboxgl && typeof mapboxgl === 'undefined') return;
 
   const visibleStations = getStationsForCurrentContext(stations);
 
@@ -639,24 +631,31 @@ function renderStationMarkers(stations) {
       e.stopPropagation();
     });
 
-    const marker = new mapboxgl.Marker({
-      element: el,
-      anchor: 'bottom',
-    })
+    const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
       .setLngLat([s.lng, s.lat])
-      .addTo(map);
+      .addTo(window.map);
 
     stationMarkers.push({ marker, station: s, el });
   });
+}
+
+function ensureStationDrawer() {
+  let drawer = document.getElementById('station-drawer');
+  if (drawer) return drawer;
+
+  // si tu ne l’as pas dans le HTML, on le crée
+  drawer = document.createElement('div');
+  drawer.id = 'station-drawer';
+  drawer.className = 'station-drawer hidden';
+  document.body.appendChild(drawer);
+  return drawer;
 }
 
 function openStationPopup(station) {
   selectedStationId = getStationId(station);
   refreshStationSelection();
 
-  const drawer = document.getElementById('station-drawer');
-  if (!drawer) return;
-
+  const drawer = ensureStationDrawer();
   const brand = getBrand(station.brand || station.name);
   const prices = station.prices || {};
   const hasPrices = Object.keys(prices).length > 0;
@@ -684,7 +683,7 @@ function openStationPopup(station) {
     ? sortedPriceEntries.map(([fuel, price]) => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
         <span>${escapeHtml((FUEL_LABELS[fuel] || { label: fuel }).label)}</span>
-        <strong>€ ${price.toFixed(3)}</strong>
+        <strong>€ ${Number(price).toFixed(3)}</strong>
       </div>
     `).join('')
     : `<div style="opacity:.6;padding:10px 0">Prix non disponibles</div>`;
@@ -752,15 +751,13 @@ function toggleStations() {
 }
 
 // ──────────────────────────────────────
-// ALERTES STATIONS
+// ALERTES STATIONS (pendant navigation)
 // ──────────────────────────────────────
-
 function isAhead(uLat, uLng, bearing, sLat, sLng) {
   if (bearing === null || bearing === undefined) return true;
 
   const angle = (Math.atan2(sLng - uLng, sLat - uLat) * 180 / Math.PI + 360) % 360;
   const diff = Math.abs(angle - bearing);
-
   return diff < 80 || diff > 280;
 }
 
@@ -769,7 +766,6 @@ function checkUpcomingStations(userLat, userLng, bearing) {
 
   stationsData.forEach((s) => {
     const sid = getStationId(s);
-
     if (upcomingAlertShown.has(sid)) return;
 
     if (ARIA_NAV_SHARED.currentRouteGeoJSON?.geometry?.coordinates?.length) {
@@ -801,14 +797,16 @@ function checkUpcomingStations(userLat, userLng, bearing) {
 // ──────────────────────────────────────
 // EXPOSITION GLOBALE
 // ──────────────────────────────────────
-
 window.haversineKm = haversineKm;
 window.loadStationsAlongRoute = loadStationsAlongRoute;
 window.loadStationsNearUser = loadStationsNearUser;
 window.loadStationsInBbox = loadStationsInBbox;
+
 window.renderStationMarkers = renderStationMarkers;
 window.clearStationMarkers = clearStationMarkers;
+
 window.closeStationPopup = closeStationPopup;
 window.navigateToStation = navigateToStation;
 window.toggleStations = toggleStations;
+
 window.checkUpcomingStations = checkUpcomingStations;
