@@ -1,21 +1,74 @@
 // ═══════════════════════════════════════
-//  ARIA GPS — Contrôleur Principal (SAFE)
-//  - évite les doubles déclarations
-//  - protège userLocation
+//  ARIA GPS — Navigation Controller (SAFE + UI MODE)
+//  - GPS tracking (unique)
+//  - Follow camera in nav
+//  - HUD mode (dest-card vs nav-header)
+//  - Fix overlap: fuel button vs search loupe
+//  - Wrap start/stop/cancel navigation to force UI updates
 // ═══════════════════════════════════════
 
 if (!window.__ARIA_NAV_LOADED__) {
   window.__ARIA_NAV_LOADED__ = true;
 
-  // États globaux (utilisés ailleurs)
-  window.navActive = false;
-  window.isFollowing = false;
+  // Etats globaux
+  window.navActive = window.navActive ?? false;
+  window.isFollowing = window.isFollowing ?? false;
 
   (function () {
-    var gpsWatchId = null;
-    var weatherInterval = null;
-    var stationsInitialLoadDone = false;
+    let gpsWatchId = null;
+    let weatherInterval = null;
+    let stationsInitialLoadDone = false;
 
+    // ──────────────────────────────────────
+    // HUD MODE (IMPORTANT)
+    // ──────────────────────────────────────
+    function setHudMode(isNav) {
+      const destCard = document.getElementById('dest-card');
+      const navHeader = document.getElementById('nav-header');
+      const searchResults = document.getElementById('search-results');
+
+      if (destCard) destCard.classList.toggle('hidden', !!isNav);
+      if (navHeader) navHeader.classList.toggle('hidden', !isNav);
+
+      // Ferme la dropdown de résultats quand on passe en nav
+      if (isNav && searchResults) {
+        searchResults.classList.add('hidden');
+        searchResults.innerHTML = '';
+      }
+      if (isNav && typeof window.hideSearchResults === 'function') {
+        try { window.hideSearchResults(); } catch {}
+      }
+
+      // ✅ Fix overlap : bouton essence vs loupe
+      const fuelBtn = document.getElementById('stations-toggle');
+      if (fuelBtn) {
+        if (isNav) {
+          // visible en navigation, mais placé en-dessous du header
+          fuelBtn.classList.remove('hidden');
+          fuelBtn.style.top = '170px';
+          fuelBtn.style.right = '14px';
+          fuelBtn.style.left = 'auto';
+          fuelBtn.style.bottom = 'auto';
+        } else {
+          // en mode recherche, on le cache (sinon il empiete sur la loupe)
+          fuelBtn.classList.add('hidden');
+        }
+      }
+    }
+
+    // helper : état UI des sections du bottom sheet
+    function setState(state) {
+      ['idle', 'routes', 'nav'].forEach((s) => {
+        const el = document.getElementById('state-' + s);
+        if (el) el.classList.toggle('hidden', s !== state);
+      });
+    }
+
+    window.setState = window.setState || setState;
+
+    // ──────────────────────────────────────
+    // ENV (Vercel)
+    // ──────────────────────────────────────
     async function loadEnv() {
       try {
         const res = await fetch('/api/env');
@@ -45,6 +98,10 @@ if (!window.__ARIA_NAV_LOADED__) {
       updateClock();
       setInterval(updateClock, 30000);
 
+      // Mode par défaut : recherche (nav off)
+      setHudMode(false);
+      setState('idle');
+
       if (
         ARIA_CONFIG.MAPBOX_TOKEN &&
         !ARIA_CONFIG.MAPBOX_TOKEN.includes('VOTRE') &&
@@ -57,25 +114,25 @@ if (!window.__ARIA_NAV_LOADED__) {
       }
 
       if (typeof initARIA === 'function') initARIA();
+      if (typeof initSupabase === 'function') initSupabase();
 
       setTimeout(() => {
         document.getElementById('splash')?.classList.add('hidden');
 
         setTimeout(() => {
           if (typeof initSearch === 'function') initSearch();
-          if (typeof speakARIA === 'function') {
-            speakARIA('Bonjour ! ARIA GPS est prêt. Où souhaitez-vous aller ?');
-          }
+          if (typeof speakARIA === 'function') speakARIA('Bonjour ! ARIA GPS est prêt. Où souhaitez-vous aller ?');
         }, 300);
-      }, 2000);
-
-      if (typeof initSupabase === 'function') initSupabase();
+      }, 1600);
 
       startGeolocationTracking();
+
+      // ✅ Wrap start/stop/cancel pour forcer le bon UI mode
+      wrapNavigationFunctions();
     }
 
     // ──────────────────────────────────────
-    // GÉOLOCALISATION
+    // GPS TRACKING (UNIQUE)
     // ──────────────────────────────────────
     function ensureUserLocationObject() {
       if (!window.userLocation || typeof window.userLocation !== 'object') {
@@ -111,10 +168,7 @@ if (!window.__ARIA_NAV_LOADED__) {
       const lat = pos?.coords?.latitude;
       const lng = pos?.coords?.longitude;
 
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        console.warn('⚠ Coordonnées GPS invalides');
-        return;
-      }
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
       const heading = Number.isFinite(pos?.coords?.heading) ? pos.coords.heading : null;
       const speed = Number.isFinite(pos?.coords?.speed) ? pos.coords.speed : 0;
@@ -128,20 +182,35 @@ if (!window.__ARIA_NAV_LOADED__) {
       loc.accuracy = accuracy;
       loc.timestamp = Date.now();
 
-      if (typeof updateUserMarker === 'function') {
-        try { updateUserMarker(lat, lng, heading); } catch (e) { console.warn('updateUserMarker error:', e); }
+      // UI GPS pill
+      const gpsPill = document.getElementById('gps-pill');
+      if (gpsPill) {
+        gpsPill.textContent = 'GPS ✓';
+        gpsPill.style.color = '#00e676';
       }
 
-      if (typeof updateNavigationProgress === 'function') {
-        try { updateNavigationProgress(lat, lng, heading); } catch (e) { console.warn('updateNavigationProgress error:', e); }
+      // Marker + speed
+      if (typeof window.updateUserMarker === 'function') {
+        try { window.updateUserMarker(lat, lng, heading); } catch {}
       }
 
-      if (typeof updateSpeedUI === 'function') {
-        try { updateSpeedUI(speed); } catch (e) { console.warn('updateSpeedUI error:', e); updateDefaultSpeedUI(speed); }
+      if (typeof window.updateSpeedUI === 'function') {
+        try { window.updateSpeedUI(speed); } catch { updateDefaultSpeedUI(speed); }
       } else {
         updateDefaultSpeedUI(speed);
       }
 
+      // Progress nav (si tu l’as)
+      if (typeof window.updateNavigationProgress === 'function') {
+        try { window.updateNavigationProgress(lat, lng, heading); } catch {}
+      }
+
+      // Stations alert
+      if (typeof window.checkUpcomingStations === 'function') {
+        try { window.checkUpcomingStations(lat, lng, heading); } catch {}
+      }
+
+      // initial fetch weather + stations
       if (isInitial) {
         fetchWeatherSafe(lat, lng);
 
@@ -151,16 +220,16 @@ if (!window.__ARIA_NAV_LOADED__) {
           if (Number.isFinite(cur.lat) && Number.isFinite(cur.lng)) fetchWeatherSafe(cur.lat, cur.lng);
         }, 600000);
 
-        if (!stationsInitialLoadDone && typeof loadStationsNearUser === 'function') {
+        if (!stationsInitialLoadDone && typeof window.loadStationsNearUser === 'function') {
           stationsInitialLoadDone = true;
           setTimeout(() => {
             const cur = ensureUserLocationObject();
-            loadStationsNearUser(cur.lat, cur.lng, 15);
+            window.loadStationsNearUser(cur.lat, cur.lng, 15);
           }, 1500);
         }
       }
 
-      // Suivi carte en navigation
+      // Follow cam (en navigation + follow)
       if (window.navActive && window.isFollowing && window.map && typeof window.map.easeTo === 'function') {
         try {
           window.map.easeTo({
@@ -196,29 +265,15 @@ if (!window.__ARIA_NAV_LOADED__) {
       if (weatherInterval) clearInterval(weatherInterval);
       weatherInterval = setInterval(() => fetchWeatherSafe(lat, lng), 600000);
 
-      if (typeof loadStationsNearUser === 'function') {
-        setTimeout(() => loadStationsNearUser(lat, lng, 15), 2000);
+      if (typeof window.loadStationsNearUser === 'function') {
+        setTimeout(() => window.loadStationsNearUser(lat, lng, 15), 2000);
       }
     }
 
-    function stopGeolocationTracking() {
-      if (gpsWatchId !== null && navigator.geolocation) {
-        navigator.geolocation.clearWatch(gpsWatchId);
-        gpsWatchId = null;
-      }
-      if (weatherInterval) {
-        clearInterval(weatherInterval);
-        weatherInterval = null;
-      }
-    }
-
-    // ──────────────────────────────────────
-    // MÉTÉO / UI
-    // ──────────────────────────────────────
     function fetchWeatherSafe(lat, lng) {
-      if (typeof fetchWeather !== 'function') return;
+      if (typeof window.fetchWeather !== 'function') return;
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-      try { fetchWeather(lat, lng); } catch (err) { console.warn('weather error:', err); }
+      try { window.fetchWeather(lat, lng); } catch {}
     }
 
     function updateDefaultSpeedUI(speedMps) {
@@ -229,63 +284,90 @@ if (!window.__ARIA_NAV_LOADED__) {
       if (speedPill) speedPill.textContent = `${kmh} km/h`;
     }
 
+    // ──────────────────────────────────────
+    // UI: Clock / Demo
+    // ──────────────────────────────────────
+    function updateClock() {
+      const el = document.getElementById('clock');
+      if (el) el.textContent = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    }
+
     function showDemoMode() {
       document.getElementById('splash')?.classList.add('hidden');
-      if (typeof initSearch === 'function') initSearch();
-      if (typeof addAlert === 'function') {
-        addAlert('info', 'Clés API manquantes — configurez Vercel Environment Variables', 'Config', 'badge-blue');
+      if (typeof window.initSearch === 'function') window.initSearch();
+      if (typeof window.addAlert === 'function') {
+        window.addAlert('info', 'Clés API manquantes — configurez Vercel Environment Variables', 'Config', 'badge-blue');
       }
+      setHudMode(false);
       setState('idle');
     }
 
-    function updateClock() {
-      const el = document.getElementById('clock');
-      if (el) {
-        el.textContent = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-      }
+    // ──────────────────────────────────────
+    // WRAP NAV FUNCTIONS (force UI mode)
+    // ──────────────────────────────────────
+    function wrapNavigationFunctions() {
+      if (window.__ARIA_NAV_WRAPPED__) return;
+      window.__ARIA_NAV_WRAPPED__ = true;
+
+      // start
+      const originalStart = window.startNavigation;
+      window.startNavigation = async function (...args) {
+        // Force UI nav mode
+        setHudMode(true);
+        setState('nav');
+        window.navActive = true;
+        window.isFollowing = true;
+
+        // call original if exists
+        if (typeof originalStart === 'function') {
+          return await originalStart.apply(this, args);
+        }
+      };
+
+      // stop
+      const originalStop = window.stopNavigation;
+      window.stopNavigation = function (...args) {
+        window.navActive = false;
+        setHudMode(false);
+        setState('idle');
+
+        if (typeof originalStop === 'function') return originalStop.apply(this, args);
+      };
+
+      // cancel
+      const originalCancel = window.cancelRoute;
+      window.cancelRoute = function (...args) {
+        window.navActive = false;
+        setHudMode(false);
+        setState('idle');
+
+        if (typeof originalCancel === 'function') return originalCancel.apply(this, args);
+      };
     }
 
-    function setState(state) {
-      ['idle', 'routes', 'nav'].forEach((s) => {
-        const el = document.getElementById('state-' + s);
-        if (el) el.classList.toggle('hidden', s !== state);
-      });
-    }
-
+    // ──────────────────────────────────────
+    // GLOBAL CLICK HANDLERS
+    // ──────────────────────────────────────
     document.addEventListener('click', (e) => {
       if (!e.target.closest('#top-hud') && !e.target.closest('#search-results')) {
-        if (typeof hideSearchResults === 'function') hideSearchResults();
+        if (typeof window.hideSearchResults === 'function') window.hideSearchResults();
       }
       if (e.target === document.getElementById('report-modal')) {
-        if (typeof closeReportModal === 'function') closeReportModal();
+        if (typeof window.closeReportModal === 'function') window.closeReportModal();
       }
     });
 
     window.addEventListener('beforeunload', () => {
-      stopGeolocationTracking();
+      if (gpsWatchId !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(gpsWatchId);
+        gpsWatchId = null;
+      }
+      if (weatherInterval) clearInterval(weatherInterval);
     });
 
-    // Exposition minimale
-    window.setState = setState;
-    window.updateClock = updateClock;
+    // expose helpers
+    window.setHudMode = setHudMode;
     window.startApp = startApp;
+    window.updateClock = updateClock;
   })();
-}
-// --- SHIM: startSearch() pour le bouton + ARIA ---
-if (typeof window.startSearch !== 'function') {
-  window.startSearch = async function startSearch() {
-    const q = document.getElementById('search-input')?.value?.trim();
-    if (!q) {
-      if (typeof window.showToast === 'function') window.showToast('Entrez une destination');
-      return;
-    }
-
-    // Priorité : la fonction que tu utilises déjà dans aria.js
-    if (typeof window.searchPlaces === 'function') {
-      return await window.searchPlaces(q);
-    }
-
-    console.warn('startSearch: searchPlaces() introuvable');
-    if (typeof window.showToast === 'function') window.showToast('Recherche indisponible');
-  };
 }
