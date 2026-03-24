@@ -795,6 +795,239 @@ function checkUpcomingStations(userLat, userLng, bearing) {
 }
 
 // ──────────────────────────────────────
+// ROUTES SHIM (si calculateRoutes est manquant)
+// ──────────────────────────────────────
+(function () {
+  if (typeof window.calculateRoutes === 'function') return;
+
+  const ROUTE_SOURCE_ID = 'aria-route-src';
+  const ROUTE_LAYER_ID  = 'aria-route-layer';
+
+  let lastRoutes = [];
+  let selectedRouteIndex = 0;
+  let lastDestLabel = 'Destination';
+
+  function fmtTime(sec) {
+    const m = Math.round(sec / 60);
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `${h}h${String(mm).padStart(2,'0')}`;
+  }
+
+  function fmtKm(meters) {
+    const km = meters / 1000;
+    return km >= 10 ? `${km.toFixed(0)} km` : `${km.toFixed(1)} km`;
+  }
+
+  function setHudNavVisible(isNav) {
+    const destCard = document.getElementById('dest-card');
+    const navHeader = document.getElementById('nav-header');
+    if (destCard) destCard.classList.toggle('hidden', !!isNav);
+    if (navHeader) navHeader.classList.toggle('hidden', !isNav);
+  }
+
+  function setStateSafe(state) {
+    if (typeof window.setState === 'function') window.setState(state);
+  }
+
+  function drawRouteOnMap(routeGeoJSON) {
+    if (!window.map || !routeGeoJSON) return;
+
+    try {
+      if (window.map.getLayer(ROUTE_LAYER_ID)) window.map.removeLayer(ROUTE_LAYER_ID);
+      if (window.map.getSource(ROUTE_SOURCE_ID)) window.map.removeSource(ROUTE_SOURCE_ID);
+
+      window.map.addSource(ROUTE_SOURCE_ID, {
+        type: 'geojson',
+        data: routeGeoJSON,
+      });
+
+      window.map.addLayer({
+        id: ROUTE_LAYER_ID,
+        type: 'line',
+        source: ROUTE_SOURCE_ID,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#00d4ff',
+          'line-width': 6,
+          'line-opacity': 0.95,
+        },
+      });
+    } catch (e) {
+      console.warn('drawRouteOnMap error:', e);
+    }
+  }
+
+  function clearRouteOnMap() {
+    if (!window.map) return;
+    try {
+      if (window.map.getLayer(ROUTE_LAYER_ID)) window.map.removeLayer(ROUTE_LAYER_ID);
+      if (window.map.getSource(ROUTE_SOURCE_ID)) window.map.removeSource(ROUTE_SOURCE_ID);
+    } catch (e) {}
+  }
+
+  function setActiveRoute(route) {
+    if (!route?.geometry) return;
+
+    // GeoJSON ligne
+    const routeGeoJSON = {
+      type: 'Feature',
+      properties: {},
+      geometry: route.geometry,
+    };
+
+    // Steps
+    const steps = route?.legs?.[0]?.steps || [];
+
+    window.ARIA_NAV_SHARED = window.ARIA_NAV_SHARED || {};
+    window.ARIA_NAV_SHARED.currentRouteGeoJSON = routeGeoJSON;
+    window.ARIA_NAV_SHARED.currentRouteSteps = steps;
+    window.ARIA_NAV_SHARED.currentStepIndex = 0;
+
+    drawRouteOnMap(routeGeoJSON);
+
+    // UI résumé
+    const t = document.getElementById('nav-remaining-time');
+    const d = document.getElementById('nav-remaining-dist');
+    if (t) t.textContent = fmtTime(route.duration);
+    if (d) d.textContent = `${fmtKm(route.distance)} restants`;
+
+    const etaTop = document.getElementById('eta-time');
+    if (etaTop) etaTop.textContent = fmtTime(route.duration);
+
+    const destName = document.getElementById('nav-dest-name');
+    if (destName) destName.textContent = lastDestLabel;
+
+    // Turn UI initial
+    const turnStreet = document.getElementById('turn-street');
+    const turnSub = document.getElementById('turn-sub');
+    const distBig = document.getElementById('dist-big');
+    const distUnit = document.getElementById('dist-unit');
+
+    const first = steps[0];
+    if (first) {
+      const instr = first.maneuver?.instruction || 'Continuez';
+      if (turnStreet) turnStreet.textContent = instr;
+      if (turnSub) turnSub.textContent = first.name ? `Sur ${first.name}` : 'Sur votre route';
+      if (distBig) distBig.textContent = Math.max(1, Math.round((first.distance || 0)));
+      if (distUnit) distUnit.textContent = 'm';
+    }
+  }
+
+  function renderRoutesList(routes) {
+    const list = document.getElementById('routes-list');
+    if (!list) return;
+
+    list.innerHTML = routes.slice(0, 3).map((r, i) => {
+      const active = i === selectedRouteIndex;
+      return `
+        <div class="route-pill ${active ? 'route-active' : 'route-idle'}" data-route-idx="${i}">
+          <div class="rp-label">Option ${i + 1}</div>
+          <div class="rp-time ${active ? 'rp-time-a' : 'rp-time-i'}">${fmtTime(r.duration)}</div>
+          <div class="rp-price ${active ? 'rp-price-a' : 'rp-price-i'}">${fmtKm(r.distance)}</div>
+        </div>
+      `;
+    }).join('');
+
+    list.querySelectorAll('[data-route-idx]').forEach((el) => {
+      el.addEventListener('click', () => {
+        selectedRouteIndex = Number(el.getAttribute('data-route-idx'));
+        renderRoutesList(routes);
+        setActiveRoute(routes[selectedRouteIndex]);
+      });
+    });
+  }
+
+  // ✅ Fonction manquante : appelée par map.js / aria.js
+  window.calculateRoutes = async function calculateRoutes(destLat, destLng, label = 'Destination') {
+    lastDestLabel = label;
+
+    const u = window.userLocation;
+    if (!u || !Number.isFinite(u.lat) || !Number.isFinite(u.lng)) {
+      if (typeof showToast === 'function') showToast('Position GPS non disponible');
+      return;
+    }
+
+    if (!window.ARIA_CONFIG?.MAPBOX_TOKEN) {
+      if (typeof showToast === 'function') showToast('MAPBOX_TOKEN manquant');
+      return;
+    }
+
+    const from = `${u.lng},${u.lat}`;
+    const to = `${destLng},${destLat}`;
+
+    const url =
+      `https://api.mapbox.com/directions/v5/mapbox/driving/${from};${to}` +
+      `?alternatives=true&geometries=geojson&overview=full&steps=true&language=fr` +
+      `&access_token=${encodeURIComponent(window.ARIA_CONFIG.MAPBOX_TOKEN)}`;
+
+    if (typeof showToast === 'function') showToast('Calcul itinéraire...');
+
+    const data = await fetch(url).then(r => r.json()).catch(() => null);
+    const routes = Array.isArray(data?.routes) ? data.routes : [];
+
+    if (!routes.length) {
+      if (typeof showToast === 'function') showToast('Aucun itinéraire trouvé');
+      return;
+    }
+
+    lastRoutes = routes;
+    selectedRouteIndex = 0;
+
+    // Affiche options itinéraires
+    setStateSafe('routes');
+    setHudNavVisible(false);
+
+    renderRoutesList(routes);
+    setActiveRoute(routes[0]);
+
+    // Pré-remplissage de l’heure d’arrivée
+    const arr = document.getElementById('stat-arr');
+    if (arr) {
+      const etaMs = Date.now() + routes[0].duration * 1000;
+      arr.textContent = new Date(etaMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    }
+  };
+
+  window.startNavigation = window.startNavigation || async function startNavigation() {
+    if (!lastRoutes.length) {
+      if (typeof showToast === 'function') showToast('Choisissez un itinéraire');
+      return;
+    }
+
+    window.navActive = true;
+    window.isFollowing = true;
+
+    setStateSafe('nav');
+    setHudNavVisible(true);
+
+    const route = lastRoutes[selectedRouteIndex] || lastRoutes[0];
+    setActiveRoute(route);
+
+    // petit message ARIA si dispo
+    const etaMs = Date.now() + (route.duration || 0) * 1000;
+    const arrivalTime = new Date(etaMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    if (typeof window.ariaOnNavStart === 'function') window.ariaOnNavStart(lastDestLabel, arrivalTime);
+  };
+
+  window.stopNavigation = window.stopNavigation || function stopNavigation() {
+    window.navActive = false;
+    setHudNavVisible(false);
+    setStateSafe('idle');
+    clearRouteOnMap();
+  };
+
+  window.cancelRoute = window.cancelRoute || function cancelRoute() {
+    lastRoutes = [];
+    selectedRouteIndex = 0;
+    setHudNavVisible(false);
+    setStateSafe('idle');
+    clearRouteOnMap();
+  };
+})();
+
+// ──────────────────────────────────────
 // EXPOSITION GLOBALE
 // ──────────────────────────────────────
 window.haversineKm = haversineKm;
