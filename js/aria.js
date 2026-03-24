@@ -25,6 +25,10 @@ function getNavStateSafe() {
   return !!window.navActive;
 }
 
+function getCurrentAriaState() {
+  return getNavStateSafe() ? 'nav' : 'idle';
+}
+
 function setAriaMsg(state, message) {
   const idleEl = document.getElementById('aria-idle-msg');
   const navEl = document.getElementById('aria-nav-msg');
@@ -35,13 +39,10 @@ function setAriaMsg(state, message) {
   if (idleEl && state !== 'idle' && !getNavStateSafe()) {
     idleEl.textContent = message;
   }
+
   if (navEl && state !== 'nav' && getNavStateSafe()) {
     navEl.textContent = message;
   }
-}
-
-function getCurrentAriaState() {
-  return getNavStateSafe() ? 'nav' : 'idle';
 }
 
 function ariaHasSpeechSynthesis() {
@@ -179,10 +180,10 @@ function initARIA() {
         ariaWarn('recognition error:', event?.error || event);
       };
 
-      ariaRecognition.onresult = (event) => {
+      ariaRecognition.onresult = async (event) => {
         const transcript = event?.results?.[0]?.[0]?.transcript?.trim();
         if (!transcript) return;
-        handleVoiceCommand(transcript);
+        await handleVoiceCommand(transcript);
       };
     } else {
       ariaWarn('SpeechRecognition non disponible sur cet appareil');
@@ -197,7 +198,9 @@ function initARIA() {
 
 function toggleMic() {
   if (!ariaRecognition) {
-    typeof showToast === 'function' && showToast('Commande vocale non disponible sur cet appareil');
+    if (typeof showToast === 'function') {
+      showToast('Commande vocale non disponible sur cet appareil');
+    }
     return;
   }
 
@@ -213,7 +216,7 @@ function toggleMic() {
 }
 
 // ──────────────────────────────────────
-// PARSING COMMANDE
+// PARSING DESTINATION
 // ──────────────────────────────────────
 
 function extractDestinationFromSpeech(rawText = '') {
@@ -222,8 +225,12 @@ function extractDestinationFromSpeech(rawText = '') {
 
   const patterns = [
     /^(?:aria[\s,]+)?je veux aller\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je voudrais aller\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je voudrai aller\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
     /^(?:aria[\s,]+)?je veux aller au\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je voudrais aller au\s+(.+)$/i,
     /^(?:aria[\s,]+)?je veux aller a\s+(.+)$/i,
+    /^(?:aria[\s,]+)?je voudrais aller a\s+(.+)$/i,
     /^(?:aria[\s,]+)?je vais a\s+(.+)$/i,
     /^(?:aria[\s,]+)?aller\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
     /^(?:aria[\s,]+)?va\s+(?:a|à|au|aux|vers)\s+(.+)$/i,
@@ -241,7 +248,7 @@ function extractDestinationFromSpeech(rawText = '') {
   for (const pattern of patterns) {
     const match = raw.match(pattern);
     if (match && match[1]) {
-      return match[1].trim();
+      return match[1].trim().replace(/[?.!,;:]+$/, '');
     }
   }
 
@@ -263,23 +270,33 @@ async function executeARIAAction(action) {
         const query = action.query?.trim();
         if (!query) return false;
 
+        ariaLog('Recherche destination:', query);
         setAriaMsg(getCurrentAriaState(), `Je cherche ${query}…`);
         speakARIA(`Je cherche ${query}.`);
 
-        if (typeof window.searchPlaces === 'function') {
-          await window.searchPlaces(query);
-          return true;
+        const input = document.getElementById('search-input');
+        if (input) {
+          input.value = query;
         }
 
-        const input = document.getElementById('search-input');
-        if (input) input.value = query;
+        if (typeof window.searchPlaces === 'function') {
+          const results = await window.searchPlaces(query);
+
+          if (Array.isArray(results) && results.length === 1 && typeof window.selectDestination === 'function') {
+            await window.selectDestination(0);
+          }
+
+          return true;
+        }
 
         if (typeof window.startSearch === 'function') {
           await window.startSearch();
           return true;
         }
 
-        typeof showToast === 'function' && showToast('Recherche indisponible');
+        if (typeof showToast === 'function') {
+          showToast('Recherche indisponible');
+        }
         return false;
       }
 
@@ -311,7 +328,9 @@ async function executeARIAAction(action) {
           return true;
         }
 
-        typeof showToast === 'function' && showToast('Démarrage navigation indisponible');
+        if (typeof showToast === 'function') {
+          showToast('Démarrage navigation indisponible');
+        }
         return false;
       }
 
@@ -323,7 +342,9 @@ async function executeARIAAction(action) {
           return true;
         }
 
-        typeof showToast === 'function' && showToast('Arrêt navigation indisponible');
+        if (typeof showToast === 'function') {
+          showToast('Arrêt navigation indisponible');
+        }
         return false;
       }
 
@@ -335,7 +356,9 @@ async function executeARIAAction(action) {
           return true;
         }
 
-        typeof showToast === 'function' && showToast('Annulation indisponible');
+        if (typeof showToast === 'function') {
+          showToast('Annulation indisponible');
+        }
         return false;
       }
 
@@ -457,12 +480,21 @@ async function handleVoiceCommand(transcript) {
     return;
   }
 
-  if (includesAny(text, ['maison'])) {
+  if (
+    includesAny(text, [
+      'maison'
+    ])
+  ) {
     await executeARIAAction({ type: 'quick-destination', value: 'Maison' });
     return;
   }
 
-  if (includesAny(text, ['travail', 'bureau'])) {
+  if (
+    includesAny(text, [
+      'travail',
+      'bureau'
+    ])
+  ) {
     await executeARIAAction({ type: 'quick-destination', value: 'Travail' });
     return;
   }
@@ -513,7 +545,9 @@ async function handleVoiceCommand(transcript) {
   }
 
   const destination = extractDestinationFromSpeech(raw);
+
   if (destination) {
+    ariaLog('Destination détectée:', destination);
     await executeARIAAction({
       type: 'search',
       query: destination
@@ -522,6 +556,7 @@ async function handleVoiceCommand(transcript) {
   }
 
   if (raw.length >= 3) {
+    ariaLog('Fallback recherche brute:', raw);
     await executeARIAAction({
       type: 'search',
       query: raw
